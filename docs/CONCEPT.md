@@ -4,6 +4,11 @@
 **Forked from:** IIR-Compare  
 **Date:** 2026-08-18  
 
+> **Implementation-ready contracts:** exact formulas, interfaces, ABI, tolerances, and
+> resolved ambiguities live in [`CONTRACTS.md`](./CONTRACTS.md), which is authoritative
+> wherever it differs from the sketches in this document (notably the Band-Pass and
+> All-Pass coefficient formulas below — see CONTRACTS.md §3).
+
 ---
 
 ## 1. Goal
@@ -25,7 +30,7 @@ All filters are **2nd-order Butterworth** unless noted. All support both a
 | **Low-Pass (LP)** | `fc` [Hz] | Direct Form 1 biquad, bilinear transform |
 | **High-Pass (HP)** | `fc` [Hz] | Same topology, numerator sign-flipped |
 | **Band-Pass (BP)** | `f_low`, `f_high` [Hz] | `fc = √(f_low · f_high)`, `Q = fc / (f_high − f_low)` |
-| **All-Pass (AP)** | `fc` [Hz], `Q` (damping) | Flat magnitude, adjustable phase. 2nd-order phase shifter. |
+| **All-Pass (AP)** | `fc` [Hz], `Q` (damping) | Flat magnitude, adjustable phase. 2nd-order phase shifter; `Q` defaults to Butterworth damping. |
 
 ### Band-Pass parameterization
 - User enters `f_low` and `f_high`; `fc` and `Q` are derived and displayed live.
@@ -37,7 +42,11 @@ All filters are **2nd-order Butterworth** unless noted. All support both a
 - Flat magnitude (`|H(ejω)| = 1` for all ω), phase shifts from 0° (DC) to −360° (Nyquist).
 - Phase = −180° exactly at `fc`.
 - Numerator mirrors denominator: if denom = `1 + a1·z⁻¹ + a2·z⁻²`, then num = `a2 + a1·z⁻¹ + 1`.
-- Default `Q = 1/√2 ≈ 0.707` (Butterworth damping, no magnitude ringing in time domain).
+- `Q` is user-adjustable because it controls the width and steepness of the phase transition while preserving unity magnitude.
+- Default `Q = 1/√2 ≈ 0.707` (Butterworth damping). The UI constrains `Q` to
+  `0.25 <= Q <= 4.0` to prevent invalid or impractical designs while retaining useful
+  control over the phase transition.
+- The selected `Q` is used consistently by the scipy ideal calculation, the C coefficient calculation, plots, validation, and export.
 
 ---
 
@@ -111,9 +120,9 @@ IIR-FilterDesignSuite/
                                                  │  │ a2     │0.5916 │0.5916│ │
                                                  │  └────────┴───────┴──────┘ │
                                                  │                            │
-                                                 │  fc error sweep:           │
+                                                 │  response error:           │
                                                  │  max Δ = 0.012 dB          │
-                                                 │  RMS Δ = 0.003 dB          │
+                                                 │  coefficient sweep: 1000  │
                                                  └────────────────────────────┘
 ```
 
@@ -138,8 +147,12 @@ IIR-FilterDesignSuite/
   - x-axis: log scale, 10 Hz to min(0.7·fs, fs/2−1).
   - y-axis: data-driven.
 - Coefficient table: b0, b1, b2, a1, a2 — ideal (float) vs Q14 (int32_t / 2¹⁴).
-- Error sweep summary: max and RMS amplitude error (dB) across the fc range
-  (10 Hz to 0.45·fs, step 10 Hz).
+- Selected-filter response validation: max and RMS amplitude error (dB) between the
+  ideal and Q14 responses for the current design.
+- C coefficient accuracy: a sweep of 1,000 cutoff frequencies over the complete
+  supported cutoff range, comparing C-generated coefficients with ideal coefficients.
+  Report max and RMS absolute coefficient error, plus the worst-case cutoff. This is
+  reported separately from response error.
 
 ---
 
@@ -155,9 +168,12 @@ float norm = K2 + M_SQRT2 * K + 1.0f;   // Butterworth Q = 1/√2
 
 // LP:   b0=b2=K²/norm,  b1=2·b0,   a1=2(K²-1)/norm, a2=(K²-√2K+1)/norm
 // HP:   b0=b2=1/norm,   b1=-2·b0,  a1,a2 same as LP
-// BP:   b0=-b2=BW·K/norm_bp,  b1=0,  a1=2(K²-1)/norm_bp, a2=(K²-Kw·K+1)/norm_bp
-//       where BW=(f_high-f_low)/fs·π,  norm_bp = K²+BW·K+1
-// AP:   num = {a2, a1, 1},  den = {1, a1, a2}  (mirror of LP/HP denominator)
+// BP:   dual-edge-prewarped (K_low=tan(π·f_low/fs), K_high=tan(π·f_high/fs)) —
+//       exact formula in CONTRACTS.md §3; a single center-K approximation does
+//       NOT hit exact -3dB edges for non-narrow bands.
+// AP:   selected Q is used to calculate the denominator; num = {a2, a1, 1},
+//       den = {1, a1, a2} (mirror of the denominator) — exact w0/alpha formula
+//       in CONTRACTS.md §3
 
 // Q14 quantization:
 int32_t q14(float x) { return (int32_t)roundf(x * 16384.0f); }
@@ -170,17 +186,40 @@ The shared library is compiled once at app start, cached until the next launch.
 
 ## 6. Error Analysis
 
-For each filter block in the Inspector, the error sweep runs:
+Validation has two separate analyses so response quality is not confused with the
+accuracy of the C implementation's parameterization.
 
-1. Sweep `fc_test` from 10 Hz to 0.45·fs in steps of 10 Hz.
-2. For each `fc_test`:
-   a. Compute ideal Bode via scipy (`freqz` with sos).
-   b. Compute Q14 coefficients via C lib, reconstruct transfer function.
-   c. Compute amplitude error = |ideal_dB − q14_dB| over the sweep frequencies.
-3. Report: max error (dB), RMS error (dB), worst-case fc, plot error vs fc heatmap.
+### Selected-filter response validation
 
-The "Validate" button in the canvas runs this sweep for all blocks and surfaces
-any block where max error > 0.1 dB with a warning badge.
+For each filter block in the Inspector, the response comparison runs:
+
+1. Compute the ideal Bode response for the current block parameters via scipy.
+2. Compute Q14 coefficients via the C library and reconstruct its transfer function.
+3. Compute amplitude error = `|ideal_dB − q14_dB|` over the plotted frequency grid.
+4. Report max and RMS amplitude error in dB.
+
+The "Validate" button in the canvas runs this response comparison for all blocks and
+surfaces any block where max amplitude error > 0.1 dB with a warning badge. The same
+comparison is also shown for the combined series cascade.
+
+### C coefficient accuracy sweep
+
+For each filter type, the suite independently evaluates 1,000 evenly spaced cutoff
+frequencies from 10 Hz to `0.45·fs`, which is the complete supported cutoff range.
+For LP, HP, and AP this is `fc`; for BP it is the center frequency `fc`, while the
+configured bandwidth (or derived `Q`) remains fixed during the sweep. For each point
+it:
+
+1. Computes ideal floating-point coefficients using the same design equations and
+  parameters (including the selected `Q` where applicable).
+2. Computes C-generated Q14 coefficients and converts them back to floating point.
+3. Calculates coefficient error for `b0`, `b1`, `b2`, `a1`, and `a2` as the absolute
+  difference between C and ideal values.
+
+The report includes maximum and RMS coefficient error across all coefficients and
+cutoff points, the worst-case cutoff, and per-coefficient maxima. This sweep is
+diagnostic; the 0.1 dB pass/fail threshold applies to amplitude response, not to
+coefficient error.
 
 ---
 
@@ -229,7 +268,7 @@ export_YYYYMMDD_HHMMSS/
 | C arithmetic | Q14 fixed-point | Matches IIR-Compare baseline; runs on M0/M3/M4 without FPU |
 | UI framework | PyQt6 + embedded matplotlib | All-Python; no JS build step; matplotlib handles Bode natively |
 | Band-pass parameterization | f_low + f_high | Intuitive as passband edges; fc and Q shown as derived values |
-| All-pass topology | 2nd-order phase shifter | Mirrored biquad; default Q = 1/√2 (Butterworth damping) |
+| All-pass Q | User-adjustable, default `1/√2` | Q controls phase-transition steepness; unity magnitude is preserved; UI range `0.25 <= Q <= 4.0` |
 | Chain topology | Series only | Parallel (summing) is out of scope for v1 |
 | Export | PDF + C header + PNGs | PDF for documentation, header for firmware, PNGs for datasheets |
 | Compilation | Runtime ctypes (subprocess gcc) | Same pattern as IIR-Compare; no build system needed |

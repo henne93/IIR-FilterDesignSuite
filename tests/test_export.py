@@ -1,0 +1,684 @@
+"""Tests for export.py (Phase 6): CONTRACTS.md §10, §13; CONCEPT.md §7.
+
+Uses the session-scoped `native_backend` fixture from conftest.py (a real
+ctypes-backed NativeBackend) since header/PDF content depends on real Q14
+quantization, not a stand-in. `gcc` is required on PATH for the header
+compilation test, matching the rest of this suite's native-backend tests.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from error_analysis import COEFFICIENT_SWEEP_N
+from export import (
+    ExportError,
+    _sweep_design_at,
+    build_snapshot,
+    export_design,
+    render_header,
+)
+from filters import FilterChain
+from filters.base import fc_max
+
+FS = 13333.0
+FIXED_NOW = datetime(2026, 8, 18, 10, 30, 0, tzinfo=timezone(timedelta(hours=2)))
+
+
+def _chain_lp_hp_bp_ap(fs: float = FS) -> FilterChain:
+    chain = FilterChain(fs=fs)
+    chain.add_block("LP", fc=3000.0)
+    chain.add_block("HP", fc=1000.0)
+    chain.add_block("BP", f_low=2000.0, f_high=4000.0)
+    chain.add_block("AP", fc=2000.0, Q=1.0)
+    return chain
+
+
+# --- complete export file set -------------------------------------------------
+
+
+def test_export_produces_complete_file_set(tmp_path, native_backend):
+    chain = _chain_lp_hp_bp_ap()
+    result = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+
+    assert result.output_dir.parent == tmp_path
+    assert result.output_dir.name == "export_20260818_103000"
+
+    names = {p.name for p in result.output_dir.iterdir()}
+    assert names == {
+        "report.pdf",
+        "filter_design.h",
+        "bode_combined.png",
+        "bode_lp_1.png",
+        "bode_hp_2.png",
+        "bode_bp_3.png",
+        "bode_ap_4.png",
+        "error_sweep_1.png",
+        "error_sweep_2.png",
+        "error_sweep_3.png",  # BP now has a coefficient sweep too (CONTRACTS.md §6.3)
+        "error_sweep_4.png",
+    }
+
+
+def test_export_creates_timestamped_directory_and_handles_collision(tmp_path, native_backend):
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+
+    first = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+    second = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+
+    assert first.output_dir != second.output_dir
+    assert first.output_dir.is_dir()
+    assert second.output_dir.is_dir()
+    assert second.output_dir.name == "export_20260818_103000_1"
+
+
+# --- PDF generation -----------------------------------------------------------
+
+
+def test_pdf_is_generated_and_nonempty(tmp_path, native_backend):
+    chain = _chain_lp_hp_bp_ap()
+    result = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+
+    assert result.pdf_path.is_file()
+    data = result.pdf_path.read_bytes()
+    assert data.startswith(b"%PDF-")
+    assert len(data) > 1000
+
+
+def test_pdf_write_failure_wrapped_as_export_error(tmp_path, native_backend):
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    from export import render_pdf
+
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+    # A directory in place of the target PDF path makes the underlying
+    # write fail with a real OSError, exercising render_pdf's own wrapping.
+    bad_path = tmp_path / "report.pdf"
+    bad_path.mkdir()
+    with pytest.raises(ExportError, match="report.pdf"):
+        render_pdf(snapshot, bad_path, tmp_path / "combined.png", {})
+
+
+# --- PNG generation -------------------------------------------------------------
+
+
+def test_bode_pngs_are_valid_png_files(tmp_path, native_backend):
+    chain = _chain_lp_hp_bp_ap()
+    result = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+
+    for path in [result.combined_bode_png, *result.block_bode_pngs.values()]:
+        assert path.is_file()
+        assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_error_sweep_pngs_generated_for_all_kinds_including_bp(tmp_path, native_backend):
+    chain = _chain_lp_hp_bp_ap()
+    result = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+
+    assert set(result.error_sweep_pngs) == {1, 2, 3, 4}  # LP, HP, BP, AP -- all four kinds
+    for path in result.error_sweep_pngs.values():
+        assert path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_png_write_failure_wrapped_as_export_error(tmp_path, native_backend):
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    # Point the export root at a path that already exists as a *file* --
+    # directory creation fails, which is the first filesystem operation
+    # export_design performs.
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory")
+    with pytest.raises(ExportError):
+        export_design(chain, native_backend, blocked, now=FIXED_NOW)
+
+
+# --- header content and coefficient ordering ------------------------------------
+
+
+def test_header_structure_and_pragma_once(native_backend):
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+    text = render_header(snapshot)
+
+    lines = text.splitlines()
+    assert lines[0] == "#pragma once"
+    assert "fs = 13333 Hz" in text
+    assert "#define Q14_SCALE 16384" in text
+    assert "#define Q14_TO_FLOAT(x) ((float)(x) / Q14_SCALE)" in text
+    assert text.endswith("\n")
+    assert not text.endswith("\n\n")
+
+
+def test_header_is_ascii_and_lf_terminated(native_backend):
+    chain = _chain_lp_hp_bp_ap()
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+    text = render_header(snapshot)
+
+    text.encode("ascii")  # raises if any non-ASCII character slipped in
+    raw = text.encode("ascii")
+    assert b"\r" not in raw
+
+
+def test_header_coefficient_order_is_b0_b1_b2_a1_a2(native_backend):
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+    text = render_header(snapshot)
+
+    filt1_lines = [l for l in text.splitlines() if l.startswith("#define FILT1_")]
+    order = [l.split()[1].removeprefix("FILT1_") for l in filt1_lines]
+    assert order == ["B0", "B1", "B2", "A1", "A2"]
+
+
+def test_header_values_match_snapshot_coefficients(native_backend):
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+    text = render_header(snapshot)
+    block = snapshot.blocks[0]
+
+    for coef in ("b0", "b1", "b2", "a1", "a2"):
+        int_val = getattr(block.q14_coefficients, coef)
+        float_val = getattr(block.ideal_coefficients, coef)
+        define_line = next(l for l in text.splitlines() if l.startswith(f"#define FILT1_{coef.upper()} "))
+        assert f" {int_val} " in define_line or define_line.split()[2] == str(int_val)
+        assert f"{float_val:.8f}f" in define_line
+
+
+def test_header_numbering_is_position_based_after_reorder(native_backend):
+    chain = FilterChain(fs=FS)
+    id_lp = chain.add_block("LP", fc=3000.0)
+    id_hp = chain.add_block("HP", fc=1000.0)
+    chain.move_block(id_hp, 0)  # HP now first, LP second
+
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+    text = render_header(snapshot)
+
+    assert "// Filter 1: Butterworth High-Pass" in text
+    assert "// Filter 2: Butterworth Low-Pass" in text
+    assert "FILT1_B0" in text and "FILT2_B0" in text
+
+    # Stable chain ids must never leak into the exported header text.
+    assert id_lp not in text
+    assert id_hp not in text
+
+
+# --- header compilation with GCC ------------------------------------------------
+
+
+def test_generated_header_compiles_with_gcc(tmp_path, native_backend):
+    chain = _chain_lp_hp_bp_ap()
+    result = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+
+    stub = tmp_path / "stub.c"
+    stub.write_text(
+        '#include "filter_design.h"\n'
+        '#include "filter_design.h"\n'  # exercise the #pragma once guard
+        "int main(void) {\n"
+        "    return (int)(FILT1_B0 + FILT2_A1 + FILT3_B2 + FILT4_A2 "
+        "+ Q14_TO_FLOAT(FILT1_A1));\n"
+        "}\n"
+    )
+    proc = subprocess.run(
+        ["gcc", "-Wall", "-Wextra", "-Werror", "-std=c11", "-I", str(result.output_dir), "-c", str(stub), "-o", str(tmp_path / "stub.o")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+# --- forced fresh validation -----------------------------------------------------
+
+
+def test_export_reflects_live_chain_state_not_a_stale_cache(tmp_path, native_backend):
+    chain = FilterChain(fs=FS)
+    bid = chain.add_block("LP", fc=1000.0)
+
+    chain.update_params(bid, fc=5000.0)
+    # No Validate step is ever run here -- export must compute fresh metrics
+    # directly from the current live params, per CONTRACTS.md §13.
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+
+    live_filt = chain.get_block(bid).filter
+    assert snapshot.blocks[0].ideal_coefficients == live_filt.ideal_coefficients()
+    assert snapshot.blocks[0].params["fc"] == 5000.0
+
+
+def test_export_recomputes_after_param_change_between_two_exports(tmp_path, native_backend):
+    chain = FilterChain(fs=FS)
+    bid = chain.add_block("LP", fc=1000.0)
+
+    snap1 = build_snapshot(chain, native_backend, now=FIXED_NOW)
+    chain.update_params(bid, fc=5000.0)
+    snap2 = build_snapshot(chain, native_backend, now=FIXED_NOW)
+
+    assert snap1.blocks[0].ideal_coefficients != snap2.blocks[0].ideal_coefficients
+    assert snap2.blocks[0].params["fc"] == 5000.0
+
+
+# --- BP coefficient sweep (CONTRACTS.md §6.3) --------------------------------------
+
+
+def test_bp_block_has_coefficient_sweep_defined(native_backend):
+    chain = FilterChain(fs=FS)
+    chain.add_block("BP", f_low=2000.0, f_high=4000.0)
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+
+    block = snapshot.blocks[0]
+    assert block.coefficient_sweep is not None
+    assert block.sweep_unavailable_reason is None
+    assert block.coefficient_sweep.max_abs >= 0.0
+    assert 100.0 <= block.coefficient_sweep.worst_frequency_hz <= fc_max(FS)
+    # Response error is unaffected either way and must still be present.
+    assert block.response_error is not None
+
+
+def test_bp_sweep_design_factory_covers_all_1000_points(native_backend):
+    """CONTRACTS.md §6.3: the sweep is linspace(100, fc_max(fs), 1000) for every kind."""
+    chain = FilterChain(fs=FS)
+    bid = chain.add_block("BP", f_low=2000.0, f_high=4000.0)
+    block = chain.get_block(bid)
+    design_at = _sweep_design_at(block, chain.fs)
+    assert design_at is not None
+
+    calls: list[float] = []
+
+    def counting_design_at(x):
+        calls.append(x)
+        return design_at(x)
+
+    from error_analysis import coefficient_sweep
+
+    coefficient_sweep(chain.fs, counting_design_at, native_backend)
+
+    assert len(calls) == COEFFICIENT_SWEEP_N == 1000
+    assert calls[0] == pytest.approx(100.0)
+    assert calls[-1] == pytest.approx(fc_max(chain.fs))
+
+
+def test_bp_sweep_design_factory_clamps_wide_bandwidth_without_raising(native_backend):
+    """A BP block whose bandwidth spans nearly the full domain must still sweep
+    cleanly: the clamp keeps f_low < f_high at every point, even at the edges."""
+    chain = FilterChain(fs=FS)
+    hi = fc_max(FS)
+    bid = chain.add_block("BP", f_low=100.0, f_high=hi)  # widest possible bandwidth
+    block = chain.get_block(bid)
+    design_at = _sweep_design_at(block, chain.fs)
+
+    from error_analysis import coefficient_sweep
+
+    result = coefficient_sweep(chain.fs, design_at, native_backend)  # must not raise
+    assert result.max_abs >= 0.0
+
+
+def test_error_sweep_png_generated_for_bp(tmp_path, native_backend):
+    chain = FilterChain(fs=FS)
+    chain.add_block("BP", f_low=2000.0, f_high=4000.0)
+    result = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+
+    assert 1 in result.error_sweep_pngs
+    assert result.error_sweep_pngs[1].read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_bp_sweep_results_appear_in_pdf(tmp_path, native_backend, monkeypatch):
+    """Proves BP's sweep numbers reach the PDF story, not just the snapshot --
+    parses the Paragraph text fed to reportlab rather than the compressed PDF
+    bytes."""
+    chain = _chain_lp_hp_bp_ap()
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+    bp_block = next(b for b in snapshot.blocks if b.kind == "BP")
+    assert bp_block.coefficient_sweep is not None
+
+    from export import Paragraph as _RealParagraph
+
+    captured: list[str] = []
+
+    def fake_paragraph(text, style):
+        captured.append(text)
+        return _RealParagraph(text, style)
+
+    monkeypatch.setattr("export.Paragraph", fake_paragraph)
+
+    from export import render_pdf
+
+    render_pdf(snapshot, tmp_path / "report.pdf", tmp_path / "combined.png", {})
+
+    expected_fragment = f"Coefficient sweep -- max abs: {bp_block.coefficient_sweep.max_abs:.3e}"
+    assert any(expected_fragment in text for text in captured)
+
+
+def test_all_block_kinds_have_sweep_defined(native_backend):
+    """LP/HP/AP (pre-existing) and BP (this fix) all get a coefficient sweep."""
+    chain = _chain_lp_hp_bp_ap()
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+
+    assert {b.kind for b in snapshot.blocks} == {"LP", "HP", "BP", "AP"}
+    for block in snapshot.blocks:
+        assert block.coefficient_sweep is not None
+        assert block.sweep_unavailable_reason is None
+
+
+# --- invalid-chain rejection -------------------------------------------------------
+
+
+def test_export_rejects_chain_with_invalid_block(tmp_path, native_backend):
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    chain.add_block("LP", fc=999_999.0)  # invalid: exceeds fc_max
+
+    with pytest.raises(ValueError, match="invalid"):
+        export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+
+    with pytest.raises(ValueError, match="invalid"):
+        build_snapshot(chain, native_backend, now=FIXED_NOW)
+
+    assert not any(tmp_path.iterdir())  # nothing written -- rejected before filesystem I/O
+
+
+def test_export_rejects_chain_invalidated_by_fs_change(tmp_path, native_backend):
+    chain = FilterChain(fs=40_000.0)
+    chain.add_block("LP", fc=15_000.0)  # valid at fs=40_000
+    chain.fs = 5_000.0  # now invalid: fc_max(5_000) = 2_250
+
+    with pytest.raises(ValueError, match="invalid"):
+        export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+
+
+def test_export_still_succeeds_for_a_failing_but_valid_design(tmp_path, native_backend):
+    # CONTRACTS.md §13: export is not blocked by a failing 0.1 dB badge --
+    # only by invalid *parameters*. A valid design that happens to exceed
+    # the threshold must still export, with FAIL recorded, not raise.
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    result = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+    assert result.snapshot.blocks[0].response_passed in (True, False)  # always computed, never blocks export
+    assert result.pdf_path.is_file()
+
+
+# --- empty-chain behavior -----------------------------------------------------------
+
+
+def test_export_rejects_empty_chain(tmp_path, native_backend):
+    chain = FilterChain(fs=FS)
+    with pytest.raises(ValueError, match="empty"):
+        export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+
+    with pytest.raises(ValueError, match="empty"):
+        build_snapshot(chain, native_backend, now=FIXED_NOW)
+
+    assert not any(tmp_path.iterdir())
+
+
+def test_export_missing_backend_raises(tmp_path):
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    with pytest.raises(ValueError, match="NativeBackend"):
+        build_snapshot(chain, None, now=FIXED_NOW)
+
+
+# --- disabled blocks (bypass) are excluded from every export artifact -------------
+
+
+def test_export_rejects_chain_with_no_enabled_blocks(tmp_path, native_backend):
+    chain = FilterChain(fs=FS)
+    bid = chain.add_block("LP", fc=3000.0)
+    chain.set_enabled(bid, False)
+
+    with pytest.raises(ValueError, match="no active"):
+        build_snapshot(chain, native_backend, now=FIXED_NOW)
+    with pytest.raises(ValueError, match="no active"):
+        export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+    assert not any(tmp_path.iterdir())
+
+
+def test_export_ignores_invalid_disabled_block(tmp_path, native_backend):
+    """An invalid block must not block export once it is disabled (bypass)."""
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    bad_id = chain.add_block("LP", fc=999_999.0)  # invalid
+    chain.set_enabled(bad_id, False)
+
+    result = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+    assert result.pdf_path.is_file()
+    assert len(result.snapshot.blocks) == 1
+
+
+def test_disabled_block_excluded_from_snapshot_and_renumbered(native_backend):
+    chain = FilterChain(fs=FS)
+    id1 = chain.add_block("LP", fc=3000.0)
+    id2 = chain.add_block("HP", fc=1000.0)
+    chain.add_block("AP", fc=2000.0, Q=1.0)
+    chain.set_enabled(id2, False)  # disable the middle block
+
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+
+    assert [b.kind for b in snapshot.blocks] == ["LP", "AP"]
+    assert [b.position for b in snapshot.blocks] == [1, 2]  # contiguous over the active list
+    assert [b.name for b in snapshot.blocks] == ["FILT1", "FILT2"]
+    assert snapshot.blocks[0].block_id == id1
+
+
+def test_disabled_block_excluded_from_header(native_backend):
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    bid = chain.add_block("HP", fc=1000.0)
+    chain.set_enabled(bid, False)
+
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+    text = render_header(snapshot)
+
+    assert "Butterworth High-Pass" not in text
+    assert "FILT2" not in text
+    assert "// Filter 1: Butterworth Low-Pass" in text
+
+
+def test_disabled_block_excluded_from_pngs_and_file_set(tmp_path, native_backend):
+    chain = _chain_lp_hp_bp_ap()
+    hp_id = chain.blocks[1].id
+    chain.set_enabled(hp_id, False)
+
+    result = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+
+    names = {p.name for p in result.output_dir.iterdir()}
+    assert "bode_hp_2.png" not in names
+    # LP/BP/AP renumbered contiguously over the 3 remaining active blocks.
+    assert names == {
+        "report.pdf",
+        "filter_design.h",
+        "bode_combined.png",
+        "bode_lp_1.png",
+        "bode_bp_2.png",
+        "bode_ap_3.png",
+        "error_sweep_1.png",
+        "error_sweep_2.png",
+        "error_sweep_3.png",
+    }
+
+
+def test_disabled_block_excluded_from_combined_response(tmp_path, native_backend):
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    bid = chain.add_block("HP", fc=1000.0)
+    chain.set_enabled(bid, False)
+
+    snapshot_with_disabled = build_snapshot(chain, native_backend, now=FIXED_NOW)
+
+    only_lp = FilterChain(fs=FS)
+    only_lp.add_block("LP", fc=3000.0)
+    snapshot_only_lp = build_snapshot(only_lp, native_backend, now=FIXED_NOW)
+
+    assert snapshot_with_disabled.combined_response_error.max_db == pytest.approx(
+        snapshot_only_lp.combined_response_error.max_db
+    )
+
+
+def test_disabled_block_excluded_from_pdf_story(tmp_path, native_backend, monkeypatch):
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    bid = chain.add_block("HP", fc=1000.0)
+    chain.set_enabled(bid, False)
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+
+    from export import Paragraph as _RealParagraph
+
+    captured: list[str] = []
+
+    def fake_paragraph(text, style):
+        captured.append(text)
+        return _RealParagraph(text, style)
+
+    monkeypatch.setattr("export.Paragraph", fake_paragraph)
+    from export import render_pdf
+
+    render_pdf(snapshot, tmp_path / "report.pdf", tmp_path / "combined.png", {})
+
+    assert not any("High-Pass" in text for text in captured)
+    assert any("Low-Pass" in text for text in captured)
+
+
+# --- PDF per-filter page breaks --------------------------------------------------
+
+
+def _story_for(chain, native_backend) -> list:
+    """Captures the `story` list passed to `SimpleDocTemplate.build()` without writing a real PDF."""
+    import export
+
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+    captured: dict[str, list] = {}
+
+    class _CapturingDoc:
+        def __init__(self, *a, **k):
+            pass
+
+        def build(self, story):
+            captured["story"] = story
+
+    orig = export.SimpleDocTemplate
+    export.SimpleDocTemplate = _CapturingDoc
+    try:
+        export.render_pdf(snapshot, Path("unused.pdf"), Path("unused_combined.png"), {})
+    finally:
+        export.SimpleDocTemplate = orig
+    return captured["story"]
+
+
+def test_pdf_inserts_page_break_before_every_filter_section(native_backend):
+    from reportlab.platypus import PageBreak, Paragraph
+
+    chain = _chain_lp_hp_bp_ap()
+    story = _story_for(chain, native_backend)
+
+    heading_indices = [
+        i for i, item in enumerate(story) if isinstance(item, Paragraph) and item.text.startswith("FILT")
+    ]
+    assert len(heading_indices) == 4  # LP, HP, BP, AP
+    for idx in heading_indices:
+        assert isinstance(story[idx - 1], PageBreak)
+
+
+def test_pdf_summary_has_no_leading_page_break(native_backend):
+    from reportlab.platypus import PageBreak
+
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    story = _story_for(chain, native_backend)
+
+    first_break = next(i for i, item in enumerate(story) if isinstance(item, PageBreak))
+    assert first_break > 0  # the title/summary paragraphs precede it
+    assert not any(isinstance(item, PageBreak) for item in story[:first_break])
+
+
+def test_pdf_disabled_block_gets_no_page_break_or_section(native_backend):
+    from reportlab.platypus import PageBreak
+
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    bid = chain.add_block("HP", fc=1000.0)
+    chain.set_enabled(bid, False)
+    story = _story_for(chain, native_backend)
+
+    # Only the LP filter section's break; the Combined section still gets
+    # its own separate PageBreak on top of that (checked below), so this
+    # asserts specifically that the disabled HP block contributes none.
+    filter_and_combined_breaks = sum(1 for item in story if isinstance(item, PageBreak))
+    assert filter_and_combined_breaks == 2  # LP section + Combined section
+
+
+def test_pdf_inserts_page_break_before_combined_section(native_backend):
+    from reportlab.platypus import PageBreak, Paragraph
+
+    chain = _chain_lp_hp_bp_ap()
+    story = _story_for(chain, native_backend)
+
+    combined_idx = next(
+        i for i, item in enumerate(story) if isinstance(item, Paragraph) and item.text == "Combined chain"
+    )
+    assert isinstance(story[combined_idx - 1], PageBreak)
+
+
+def test_pdf_combined_section_break_survives_with_a_single_block(native_backend):
+    """Even a one-block chain (fewest possible per-filter breaks) still gives
+    Combined its own leading PageBreak, distinct from the filter section's."""
+    from reportlab.platypus import PageBreak, Paragraph
+
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    story = _story_for(chain, native_backend)
+
+    assert sum(1 for item in story if isinstance(item, PageBreak)) == 2  # FILT1 section + Combined
+    combined_idx = next(
+        i for i, item in enumerate(story) if isinstance(item, Paragraph) and item.text == "Combined chain"
+    )
+    assert isinstance(story[combined_idx - 1], PageBreak)
+
+
+# --- filesystem failure handling -----------------------------------------------------
+
+
+def test_export_root_colliding_with_existing_file_raises_export_error(tmp_path, native_backend):
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+
+    blocked_root = tmp_path / "output"
+    blocked_root.write_text("i am a file, not a directory")
+
+    with pytest.raises(ExportError, match="output"):
+        export_design(chain, native_backend, blocked_root, now=FIXED_NOW)
+
+
+def test_header_write_failure_raises_export_error(tmp_path, native_backend):
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+
+    from export import _write_header
+
+    # A directory in place of the header path forces `open(path, "wb")` to
+    # fail with a real OSError (IsADirectoryError on Linux).
+    bad_path = tmp_path / "filter_design.h"
+    bad_path.mkdir()
+    with pytest.raises(ExportError, match="filter_design.h"):
+        _write_header(bad_path, snapshot)
+
+
+def test_png_write_failure_raises_export_error_directly(tmp_path, native_backend):
+    chain = FilterChain(fs=FS)
+    bid = chain.add_block("LP", fc=3000.0)
+    from error_analysis import bode_grid
+    from export import _save_bode_png
+
+    filt = chain.get_block(bid).filter
+    freq = bode_grid(chain.fs)
+    ideal = filt.ideal_response(freq)
+    q14 = filt.q14_response(freq, native_backend)
+
+    bad_path = tmp_path / "somewhere" / "plot.png"  # parent dir doesn't exist
+    with pytest.raises(ExportError, match="plot.png"):
+        _save_bode_png(bad_path, ideal, q14, "title")
