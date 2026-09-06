@@ -29,6 +29,9 @@ IDEAL_COLOR = "#2980b9"
 Q14_COLOR = "#c0392b"
 CURSOR_COLOR = "#555555"
 
+PHASE_YLIM = (-180.0, 180.0)
+MAGNITUDE_YLIM_FLOOR = -100.0
+
 
 def draw_cursor_line(ax, freq_hz: float) -> mcollections.LineCollection:
     """Draws a vertical measurement-cursor line spanning `ax`'s current y-range.
@@ -83,6 +86,7 @@ class BodeWidget(QWidget):
         self.ax_phase.set_ylabel("Phase (deg)")
         self.ax_phase.set_xlabel("Frequency (Hz)")
         self.ax_phase.grid(True, which="both", alpha=0.3)
+        self.ax_phase.set_ylim(*PHASE_YLIM)
 
         self._cursor_artists: list = []
 
@@ -110,8 +114,11 @@ class BodeWidget(QWidget):
             self.ax_phase.plot(q14.freq_hz, q14.phase_deg, color=Q14_COLOR, linestyle="--", label="Q14")
         self.ax_mag.relim()
         self.ax_mag.autoscale_view()
+        _, mag_top = self.ax_mag.get_ylim()
+        self.ax_mag.set_ylim(MAGNITUDE_YLIM_FLOOR, max(mag_top, MAGNITUDE_YLIM_FLOOR))
         self.ax_phase.relim()
         self.ax_phase.autoscale_view()
+        self.ax_phase.set_ylim(*PHASE_YLIM)
         self.ax_mag.legend(loc="best", fontsize="small")
         self.canvas.draw_idle()
 

@@ -107,6 +107,9 @@ ERROR_SWEEP_PLOT_N = 200
 IDEAL_COLOR = "#2980b9"
 Q14_COLOR = "#c0392b"
 
+PHASE_YLIM = (-180.0, 180.0)
+MAGNITUDE_YLIM_FLOOR = -100.0
+
 FILTER_KIND_NAMES: Mapping[BlockKind, str] = MappingProxyType(
     {
         "LP": "Butterworth Low-Pass",
@@ -533,6 +536,8 @@ def _save_bode_png(path: Path, ideal, q14, title: str) -> None:
     ax_mag.set_title(title)
     ax_mag.grid(True, which="both", alpha=0.3)
     ax_mag.legend(loc="best", fontsize="small")
+    _, mag_top = ax_mag.get_ylim()
+    ax_mag.set_ylim(MAGNITUDE_YLIM_FLOOR, max(mag_top, MAGNITUDE_YLIM_FLOOR))
 
     ax_phase.set_xscale("log")
     ax_phase.plot(ideal.freq_hz, ideal.phase_deg, color=IDEAL_COLOR, label="Ideal")
@@ -540,6 +545,7 @@ def _save_bode_png(path: Path, ideal, q14, title: str) -> None:
     ax_phase.set_ylabel("Phase (deg)")
     ax_phase.set_xlabel("Frequency (Hz)")
     ax_phase.grid(True, which="both", alpha=0.3)
+    ax_phase.set_ylim(*PHASE_YLIM)
 
     _save_figure(fig, path)
 
