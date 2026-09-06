@@ -158,7 +158,7 @@ class BlockInspectorPanel(QWidget):
 
         self.table = QTableWidget(len(_COEFFICIENT_NAMES), 3)
         self.table.setObjectName("coefficientTable")
-        self.table.setHorizontalHeaderLabels(["Ideal (float64)", "Q14 (int32)", "Q14 (float)"])
+        self.table.setHorizontalHeaderLabels(["Ideal (float64)", "Q14 (int16)", "Q14 (float)"])
         self.table.setVerticalHeaderLabels(list(_COEFFICIENT_NAMES))
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         outer.addWidget(self.table)

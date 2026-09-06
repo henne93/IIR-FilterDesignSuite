@@ -25,7 +25,18 @@ def test_q14coeffs_struct_layout_matches_contract():
     fields = Q14Coeffs._fields_
     names = [name for name, _ in fields]
     assert names == ["b0", "b1", "b2", "a1", "a2"]
-    assert all(ctype is ctypes.c_int32 for _, ctype in fields)
+    assert all(ctype is ctypes.c_int16 for _, ctype in fields)
+
+
+def test_q14coeffs_and_biquadstate_are_16bit_only_no_padding():
+    """CONTRACTS.md §7/§8: all-int16_t layout, no 64-bit type anywhere in the
+    native ABI. A cheap struct-size guard against a future field-width or
+    padding regression (int16-only fields need no alignment padding, unlike a
+    mixed int16/int32 layout would)."""
+    from c_codegen import BiquadState
+
+    assert ctypes.sizeof(Q14Coeffs) == 10  # 5 x int16
+    assert ctypes.sizeof(BiquadState) == 18  # Q14Coeffs (10) + 4 x int16
 
 
 def test_discover_compiler_finds_something_on_this_machine():

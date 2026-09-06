@@ -54,6 +54,7 @@ from PyQt6.QtWidgets import (
 from c_codegen import NativeBackend as _CNativeBackend
 from export import ExportError, export_design
 from filters import FilterChain
+from project_file import PROJECT_FILE_EXTENSION, ProjectFileError, load_project, save_project
 from ui.canvas import FilterCanvas
 from ui.inspector import Inspector
 from ui.palette import FilterPalette
@@ -120,6 +121,7 @@ class MainWindow(QMainWindow):
         self.resize(900, 600)
 
         self.chain = FilterChain(fs=DEFAULT_FS_HZ)
+        self._project_path: Path | None = None
         self.canvas = FilterCanvas(self.chain)
         self.palette = FilterPalette()
         # `main()` compiles the backend via `ensure_native_backend()` before
@@ -180,6 +182,17 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
+        self.open_action = toolbar.addAction("Open")
+        self.open_action.triggered.connect(self._on_open)
+
+        self.save_action = toolbar.addAction("Save")
+        self.save_action.triggered.connect(self._on_save)
+
+        self.save_as_action = toolbar.addAction("Save As")
+        self.save_as_action.triggered.connect(self._on_save_as)
+
+        toolbar.addSeparator()
+
         self.export_action = toolbar.addAction("Export")
         self.export_action.triggered.connect(self._on_export)
 
@@ -221,6 +234,81 @@ class MainWindow(QMainWindow):
         self.canvas.refresh()
         self.inspector.refresh()
         self._on_chain_changed()
+
+    # -- Project file (save/open, CONTRACTS.md §15) --------------------------
+
+    def _on_save(self) -> None:
+        if self._project_path is None:
+            self._on_save_as()
+            return
+        self._save_to(self._project_path)
+
+    def _on_save_as(self) -> None:
+        path_str, _ = QFileDialog.getSaveFileName(
+            self, "Save project as", str(Path.cwd()), f"IIR Filter Project (*{PROJECT_FILE_EXTENSION})"
+        )
+        if not path_str:
+            return
+        path = Path(path_str)
+        if path.suffix != PROJECT_FILE_EXTENSION:
+            path = path.with_name(path.name + PROJECT_FILE_EXTENSION)
+        self._save_to(path)
+
+    def _save_to(self, path: Path) -> None:
+        try:
+            save_project(self.chain, path)
+        except ProjectFileError as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return
+        self._project_path = path
+        self.chain.mark_clean()
+        self._update_title()
+        self.statusBar().showMessage(f"Saved to {path}", 5000)
+
+    def _on_open(self) -> None:
+        if self.chain.dirty:
+            reply = QMessageBox.question(
+                self,
+                "Open project?",
+                "The filter chain has unsaved changes. Open a different project anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        path_str, _ = QFileDialog.getOpenFileName(
+            self, "Open project", str(Path.cwd()), f"IIR Filter Project (*{PROJECT_FILE_EXTENSION})"
+        )
+        if not path_str:
+            return
+
+        try:
+            fs, blocks = load_project(path_str)
+        except ProjectFileError as exc:
+            QMessageBox.critical(self, "Open failed", str(exc))
+            return  # load fully before touching the chain -- a bad file never leaves it half-mutated
+
+        try:
+            self.chain.fs = fs
+        except ValueError as exc:
+            QMessageBox.critical(self, "Open failed", f"invalid project file: {exc}")
+            return
+
+        self.chain.clear()
+        for block in blocks:
+            block_id = self.chain.add_block(block["kind"], **block["params"])
+            if not block["enabled"]:
+                self.chain.set_enabled(block_id, False)
+        self.chain.mark_clean()
+        self._project_path = Path(path_str)
+
+        self.fs_edit.setText(f"{self.chain.fs:g}")
+        self.fs_error_label.setVisible(False)
+        self.canvas.refresh()
+        self.inspector.refresh()
+        self._on_chain_changed()
+        self.statusBar().showMessage(f"Opened {path_str}", 5000)
 
     # -- Export -----------------------------------------------------------------
 

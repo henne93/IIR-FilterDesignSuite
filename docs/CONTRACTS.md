@@ -12,7 +12,7 @@ runtime on the target machine.
 
 ## 0. How to read this document
 
-Thirteen contract areas, each with: the resolved decision, the reasoning, and (where
+Fifteen contract areas, each with: the resolved decision, the reasoning, and (where
 real ambiguity remains) an explicit open question. Section 14 gives module ownership,
 build order, and required tests per phase — pulled forward into the chat report as well.
 
@@ -300,16 +300,20 @@ match across the ideal/Q14 comparison or the fixed display grid.
 ## 7. Q14 rounding, overflow, and processing semantics
 
 - **Scale factor:** 16384 (2¹⁴). This is *not* a strict Qm.n fractional format — LP/HP/BP/AP
-  coefficients can reach magnitude ~2.0 (e.g. LP/HP `a1 → ±2` as `fc` approaches the
-  band edges of its valid range), so at least 17 bits are needed to hold the scaled
-  value. **Storage/ABI type is `int32_t`** for every coefficient (matches CONCEPT.md's
-  header comment style, e.g. `int32_t` / `−22253`), which comfortably covers the full
-  valid parameter domain — no int32 overflow is reachable for any `fc`/`f_low`/`f_high`/`Q`
-  inside the ranges in §5. (A downstream firmware target that narrows to `int16_t` for
-  its actual biquad state is a concern for the *consumer* of the generated header, not
-  for this suite's own Q14 conversion or tests.)
+  coefficients can reach magnitude up to 2.0 in the theoretical Q14 format, but a full
+  sweep of every LP/HP/BP/AP design across the actual supported parameter domain (§5:
+  `fs∈[5000,40000]`, `fc`/`f_low`/`f_high`∈`[100,fc_max(fs)]`, `Q∈[0.25,4]`) gives a true
+  worst-case magnitude of **1.9958** (AP `a1`/`b1`, near `Q=4`, `fc→100`). **Storage/ABI
+  type is `int16_t`** for every coefficient — this fits inside int16 Q14 (max
+  representable ≈1.99994) with only ~0.004 headroom, tight but real, and locked by an
+  automated domain-sweep regression test (`tests/test_native_coefficients.py::test_no_coefficient_saturates_int16_across_domain`).
+  This is narrower than an earlier int32-storage design (which had large headroom by
+  construction) — the narrower width was chosen deliberately to keep the firmware-facing
+  `biquad_q14.{h,c}` 16-bit-only end to end (coefficients, samples, and state), matching a
+  16-bit ADC/DAC sample pipeline; see the "Signal processing" bullet below for the
+  accumulator consequence of that choice.
 - **Rounding mode:** round-half-away-from-zero, matching C's `roundf()`
-  (`(int32_t)roundf(x * 16384.0f)`), **not** `numpy.round`'s round-half-to-even —
+  (`(int16_t)roundf(x * 16384.0f)`), **not** `numpy.round`'s round-half-to-even —
   those differ on exact ties and would silently poison the coefficient-accuracy sweep
   with spurious 1-LSB "errors" that are a rounding-mode mismatch, not real quantization
   error.
@@ -317,11 +321,33 @@ match across the ideal/Q14 comparison or the fixed display grid.
   reimplements Q14 quantization. Every `Q14Coefficients` value is produced by calling
   the compiled C library through ctypes (§8) — there is exactly one quantization
   implementation in the whole system, in C, and Python only ever reads its output back.
-- **Overflow policy:** since int32 storage never overflows within the valid parameter
-  domain, this is a defensive-only concern. The C functions should saturate to
-  `INT32_MIN`/`INT32_MAX` rather than wrap on a hypothetical out-of-domain input — this
-  is a "should never trigger" assertion-style guard, not an expected code path (Python
-  validates parameters *before* calling into C; see §5, §8).
+- **Overflow policy (coefficients):** the int16 headroom above is tight but never
+  actually reached in-domain (regression-guarded, see above) — the C functions still
+  saturate to `INT16_MIN`/`INT16_MAX` rather than wrap on a hypothetical out-of-domain
+  input, as a defensive guard (Python validates parameters *before* calling into C; see
+  §5, §8).
+- **Overflow policy (`biquad_q14_process`'s accumulator) — accepted trade-off, not a
+  proven-safe design:** samples/state (`x1,x2,y1,y2`, the `process()` argument/return)
+  are also `int16_t`. Each of the 5 coefficient×sample products is computed as `int32_t`
+  (safe: int16×int16 has magnitude at most ~2³⁰). Summing all 5, however, has a
+  theoretical worst case around 5.4×10⁹ (using the full Q14 coefficient range) — about
+  2.5× over `int32_t`'s range — so a plain `int32_t` sum would risk genuine
+  signed-integer-overflow UB. The recommended, fully-safe option was a widened
+  `int64_t` accumulator (as the original design used, and as ARM's own CMSIS-DSP
+  `arm_biquad_cascade_df1_q15` does for exactly this reason — it costs nothing on
+  Cortex-M4, which has single-cycle 32×32→64-bit MAC hardware). **The user was told this
+  and explicitly chose a strict 32-bit-accumulator, zero-64-bit-types design instead.**
+  `biquad_q14.c` implements this with explicit saturating add/subtract
+  (`__builtin_add_overflow`/`__builtin_sub_overflow`, GCC/Clang-only, matching §9's
+  compiler restriction) at every one of the 5 accumulation steps plus the Q28→Q14
+  rescale, clamping to `[INT32_MIN, INT32_MAX]` instead of wrapping. This guarantees
+  *well-defined* behavior (no UB, no crash) but is **not a formal proof that saturation
+  is unreachable** for every in-domain design — no per-filter-type pole/gain stability
+  bound has been derived. `tests/test_native_saturation_stress.py` empirically checks
+  this: a bit-exact Python mirror of the saturating algorithm is compared against the
+  real compiled `process()` under adversarial full-scale alternating input for
+  representative designs (including the domain's tightest AP corner), reporting how
+  often — if ever — the clamp is actually reached.
 - **Signal processing (biquad_q14.c's `process()`) is out of scope for this app's own
   validation pipeline** — response comparison works entirely in the coefficient/transfer-
   function domain (dequantize → `freqz`, per §4), matching CONCEPT.md's literal wording
@@ -351,6 +377,13 @@ therefore pass every other test in the suite undetected. To close that gap:
   path rather than only checking coefficients.
 - Tolerance for this comparison is calibrated and locked alongside the other numerical
   tolerances in §11, once `biquad_q14.c` exists (Phase 2) — see §14.
+- **Additional requirement (16-bit/32-bit-accumulator design):** since the 32-bit
+  accumulator's overflow-freedom is an accepted trade-off rather than a proof (see
+  above), `biquad_q14.c` also requires the saturation-stress test described above
+  (`tests/test_native_saturation_stress.py`) — a bit-exact comparison against a Python
+  mirror of the saturating algorithm under adversarial input, reporting observed
+  saturation-event counts. This is a permanent companion to the impulse-response test,
+  not a one-time calibration.
 
 ---
 
@@ -366,7 +399,7 @@ extern "C" {
 #endif
 
 typedef struct {
-    int32_t b0, b1, b2, a1, a2;   /* Q14 fixed-point, scale = 16384 */
+    int16_t b0, b1, b2, a1, a2;   /* Q14 fixed-point, scale = 16384 */
 } q14_coeffs_t;
 
 /* Return 0 on success, negative on invalid input (defense-in-depth only —
@@ -386,14 +419,18 @@ Error codes: `0` success, `-1` frequency out of `(0, fs/2)`, `-2` `fs <= 0`,
 ctypes wrapper (`c_codegen.py`):
 ```python
 class Q14Coeffs(ctypes.Structure):
-    _fields_ = [("b0", ctypes.c_int32), ("b1", ctypes.c_int32),
-                ("b2", ctypes.c_int32), ("a1", ctypes.c_int32), ("a2", ctypes.c_int32)]
+    _fields_ = [("b0", ctypes.c_int16), ("b1", ctypes.c_int16),
+                ("b2", ctypes.c_int16), ("a1", ctypes.c_int16), ("a2", ctypes.c_int16)]
 
 lib.filter_design_lp.argtypes = [ctypes.c_float, ctypes.c_float, ctypes.POINTER(Q14Coeffs)]
 lib.filter_design_lp.restype  = ctypes.c_int
 # filter_design_hp: same signature as lp
 # filter_design_bp.argtypes = [c_float, c_float, c_float, POINTER(Q14Coeffs)]  # f_low, f_high, fs
 # filter_design_ap.argtypes = [c_float, c_float, c_float, POINTER(Q14Coeffs)]  # fc, fs, q
+
+# biquad_q14_process (src/c/biquad_q14.h) is 16-bit-only end to end:
+# lib.biquad_q14_process.argtypes = [ctypes.POINTER(BiquadState), ctypes.c_int16]
+# lib.biquad_q14_process.restype  = ctypes.c_int16
 ```
 - A nonzero C return code raises `RuntimeError` in the Python wrapper — this should be
   unreachable in normal operation since Python validates first; if it *does* trigger,
@@ -467,22 +504,44 @@ float and a note in a trailing comment for human readability:
 - Coefficient order in the header matches §2: `B0, B1, B2, A1, A2`.
 - ASCII, LF line endings, even when generated on Windows (firmware-side diffability).
 
-**Resolved (release hardening): the export folder does not bundle
+**The top-level export files above are unchanged: `filter_design.h` stays
+coefficient-only, and the top-level of the export directory does not bundle
 `biquad_q14.h`/`biquad_q14.c`.** CONCEPT.md §7's export directory listing
 enumerates exactly `report.pdf`, `filter_design.h`, `bode_combined.png`,
-`bode_<type>_<n>.png`, and `error_sweep_<n>.png` -- no `biquad_q14.*` entry,
-and `filter_design.h` itself is specified above as coefficient-only.
-`biquad_q14.{h,c}` remains firmware reference source living once in this
-repository's `src/c/` tree (§7's "bundled into the deliverable" refers to
-the suite's own source tree, not a per-export copy) -- duplicating it into
-every timestamped export folder would create N copies with no benefit. A
-firmware integrator combines the generated header with `src/c/biquad_q14.{h,c}`
-themselves; that combination is proven, not just asserted, by
-`tests/test_firmware_harness.py`, which compiles a harness `#include`-ing a
-freshly generated header together with `biquad_q14.h`, links against
-`biquad_q14.c` with `gcc -Wall -Wextra -Werror`, runs the resulting binary,
-and cross-checks its output against the ctypes `process_impulse()` path
-used elsewhere in this suite. See README.md §6.
+`bode_<type>_<n>.png`, and `error_sweep_<n>.png` at the top level -- no
+`biquad_q14.*` entry there. A firmware integrator can still combine the
+top-level generated header with `src/c/biquad_q14.{h,c}` themselves, exactly
+as before; that combination is proven by `tests/test_firmware_harness.py`,
+which compiles a harness `#include`-ing a freshly generated header together
+with `biquad_q14.h`, links against `biquad_q14.c` with `gcc -Wall -Wextra
+-Werror`, runs the resulting binary, and cross-checks its output against the
+ctypes `process_impulse()` path used elsewhere in this suite.
+
+**Reversed for a new, separate output only: the export directory's
+`firmware/` subfolder *does* bundle a complete, self-contained C package**
+(added after the original "does not bundle" decision above, which stands for
+the top-level files only). It contains: the same coefficient header (also
+named `filter_design.h`, generated fresh, byte-identical to the top-level
+one); a standalone `biquad_q14.h` variant whose `q14_coeffs_t` is inlined
+(extracted at export time from `src/c/filter_design.h`, never hand-typed a
+second time) instead of `#include`-ing a separate header -- avoiding a real
+naming collision with the coefficient header sitting right next to it, and
+avoiding pulling in the host-side `filter_design_lp/hp/bp/ap()` design
+functions that firmware never needs; a byte-for-byte verbatim copy of
+`src/c/biquad_q14.c` (never hand-duplicated, so Feature-A-style changes to
+the real implementation propagate to the next export automatically); a
+generated `example.c` wiring up the *specific* chain being exported (one
+`biquad_q14_state_t` per active block, chained in series through a
+`process_chain()` function, matching §12's series-only topology); and a
+`README.md` with integration instructions. `render_firmware_package()`
+(`export.py`) produces all of this from the same `ExportSnapshot` used
+elsewhere, with no new data model. This is proven fully self-contained --
+not just asserted -- by `tests/test_firmware_package.py`, which copies the
+generated `firmware/` folder to a location with no relationship to this
+repository, compiles it there with `-I` pointed only at that copy (no
+reference to `src/c/` at all), runs the binary, and cross-checks its output
+bit-exactly against the ctypes `NativeBackend.process_samples()` path used
+elsewhere in this suite. See README.md §6.
 
 ---
 
@@ -570,8 +629,11 @@ class FilterChain:
 
 ## 13. UI state, reset, dirty-state warning, and compiler-error handling
 
-- **No persistence in v1** (save/load explicitly out of scope, CONCEPT.md §9) — all
-  state is in-memory for the process lifetime.
+- **Persistence: save/open project files** (reversing CONCEPT.md §9's original
+  exclusion) — a `FilterChain`'s full state (`fs` + every block, valid or not, enabled or
+  not) can be saved to and reloaded from a versioned JSON project file. See §15 for the
+  format and the UI's in-place-mutation rule. UI chrome (splitter sizes, selected tab,
+  window geometry) is never persisted — only chain-model state.
 - **"Clear" button** (canvas toolbar, per CONCEPT.md's mockup) empties the block list
   only; **`fs` is left unchanged** — it's a session-wide setting, not chain content,
   and resetting it unexpectedly on "Clear" would be a surprising UX. Destructive and
@@ -622,6 +684,50 @@ class FilterChain:
 
 ---
 
+## 15. Project file format (save/open)
+
+Added after v1's initial "no persistence" decision (§13) was reversed.
+
+- **Format:** versioned JSON, one object per file:
+  ```json
+  {
+    "schema_version": 1,
+    "fs": 13333.0,
+    "blocks": [
+      {"kind": "LP", "params": {"fc": 3000.0}, "enabled": true}
+    ]
+  }
+  ```
+  `schema_version` is checked on load; an unrecognized value is rejected with an
+  actionable error rather than guessed at. File extension: `.iirfilt`. Written as
+  LF-only UTF-8 (same technique as §10's generated header) so line endings never
+  depend on platform.
+- **Scope — model-only, no UI chrome:** a project file captures exactly a
+  `FilterChain`'s round-trip state — chain-wide `fs`, plus every block's `kind`,
+  `params`, and `enabled` flag, **in chain order, including invalid and disabled
+  blocks** (unlike `export.py`'s `ExportSnapshot`, which is active-only and freshly
+  validated — a project file is round-trip state, not an export deliverable). UI
+  chrome (splitter sizes, selected block/tab, window geometry) is never persisted.
+- **`src/python/project_file.py`** owns `save_project(chain, path)` /
+  `load_project(path) -> (fs, blocks)`. `load_project` returns plain data — it does
+  **not** construct a `FilterChain` itself; the UI layer applies the result to the
+  chain it already has.
+- **UI rule — mutate the existing chain in place, never construct a new one:**
+  `ui/app.py`'s Open handler follows exactly the same pattern as the existing Reset
+  action (§13): if the chain is dirty, confirm via the same style of dialog; on
+  proceeding, set `chain.fs` first (validates), then `chain.clear()`, then
+  `chain.add_block(kind, **params)` per saved block (re-applying `enabled` via
+  `chain.set_enabled()`), then `chain.mark_clean()`. `canvas`/`inspector` hold a
+  reference to the original `FilterChain` instance, so it is mutated, never replaced.
+  A malformed file is fully parsed and validated *before* any mutation begins, so a
+  bad file can never leave the app in a half-applied state.
+- Save/Save As/Open are toolbar actions (no menu bar exists in this app); Save
+  without a known path behaves like Save As. Saving marks the chain clean (same
+  `dirty` flag that already drives the title-bar `"*"` and the unsaved-changes-on-close
+  warning, §13) and remembers the path for a subsequent plain Save.
+
+---
+
 ## Summary of deviations from CONCEPT.md
 
 1. **BP formula replaced** — CONCEPT.md's single-K/linear-bandwidth pseudocode
@@ -643,3 +749,15 @@ class FilterChain:
    new `100 Hz` design-parameter floor (§6).
 7. **`biquad_q14.c` now has a required automated test** — an impulse-response
    cross-check of `process()` — resolving what was previously an open question (§7).
+8. **`q14_coeffs_t` and `biquad_q14_state_t` narrowed from `int32_t` to `int16_t`,
+   with the MAC accumulator forced to `int32_t` (saturating) instead of the originally
+   safer `int64_t`** — a deliberate, user-directed trade-off after being shown the
+   domain-sweep headroom numbers and the accumulator's residual (unproven-safe) overflow
+   risk; see §7's "Overflow policy (`biquad_q14_process`'s accumulator)" bullet.
+9. **Save/load implemented, reversing CONCEPT.md §9's original exclusion** — a
+   versioned JSON project file (§15) captures a `FilterChain`'s full round-trip state;
+   see §13's persistence bullet.
+10. **Export's `firmware/` subfolder now bundles `biquad_q14.{h,c}` (as a generated,
+    standalone-package variant, plus a generated cascade example)** — reversing, for
+    this new subfolder only, the earlier "does not bundle" decision (§10); the
+    top-level export files are unchanged.

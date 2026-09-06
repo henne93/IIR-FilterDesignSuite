@@ -16,6 +16,7 @@ import pytest
 
 from error_analysis import COEFFICIENT_SWEEP_N
 from export import (
+    C_SRC_DIR,
     ExportError,
     _sweep_design_at,
     build_snapshot,
@@ -61,6 +62,7 @@ def test_export_produces_complete_file_set(tmp_path, native_backend):
         "error_sweep_2.png",
         "error_sweep_3.png",  # BP now has a coefficient sweep too (CONTRACTS.md §6.3)
         "error_sweep_4.png",
+        "firmware",  # drop-in C package subfolder -- see test_firmware_package.py
     }
 
 
@@ -499,6 +501,7 @@ def test_disabled_block_excluded_from_pngs_and_file_set(tmp_path, native_backend
         "error_sweep_1.png",
         "error_sweep_2.png",
         "error_sweep_3.png",
+        "firmware",
     }
 
 
@@ -682,3 +685,54 @@ def test_png_write_failure_raises_export_error_directly(tmp_path, native_backend
     bad_path = tmp_path / "somewhere" / "plot.png"  # parent dir doesn't exist
     with pytest.raises(ExportError, match="plot.png"):
         _save_bode_png(bad_path, ideal, q14, "title")
+
+
+# --- firmware/ drop-in package (CONTRACTS.md §10) -------------------------------------
+
+
+def test_firmware_subfolder_contains_expected_files(tmp_path, native_backend):
+    result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
+
+    assert result.firmware_dir == result.output_dir / "firmware"
+    names = {p.name for p in result.firmware_dir.iterdir()}
+    assert names == {"filter_design.h", "biquad_q14.h", "biquad_q14.c", "example.c", "README.md"}
+
+
+def test_firmware_biquad_c_is_byte_identical_to_src_c(tmp_path, native_backend):
+    """The DSP logic is copied verbatim, never hand-duplicated -- a Feature-A-style
+    change to src/c/biquad_q14.c must propagate to the next export automatically."""
+    result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
+
+    assert (result.firmware_dir / "biquad_q14.c").read_bytes() == (C_SRC_DIR / "biquad_q14.c").read_bytes()
+
+
+def test_firmware_header_has_no_filter_design_include_and_defines_q14_coeffs(tmp_path, native_backend):
+    result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
+
+    text = (result.firmware_dir / "biquad_q14.h").read_text(encoding="utf-8")
+    assert '#include "filter_design.h"' not in text
+    assert "typedef struct" in text
+    assert "q14_coeffs_t;" in text
+    assert "int16_t b0, b1, b2, a1, a2;" in text
+
+
+def test_firmware_filter_design_h_matches_top_level_content(tmp_path, native_backend):
+    result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
+
+    top_level = (result.output_dir / "filter_design.h").read_bytes()
+    firmware = (result.firmware_dir / "filter_design.h").read_bytes()
+    assert top_level == firmware
+
+
+def test_firmware_example_declares_one_state_per_active_block(tmp_path, native_backend):
+    chain = _chain_lp_hp_bp_ap()
+    hp_id = chain.blocks[1].id
+    chain.set_enabled(hp_id, False)  # LP, BP, AP remain active -> renumbered FILT1/2/3
+
+    result = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+    text = (result.firmware_dir / "example.c").read_text(encoding="utf-8")
+
+    assert text.count("static biquad_q14_state_t state") == 3
+    assert "state1" in text and "state2" in text and "state3" in text
+    assert "state4" not in text and "coeffs4" not in text
+    assert text.count("biquad_q14_process(&state") == 3

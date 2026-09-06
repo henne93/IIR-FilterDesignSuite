@@ -718,6 +718,102 @@ def test_export_always_forces_fresh_validation_not_a_stale_cache(window, monkeyp
     assert "fc = 1000 Hz" not in header_text
 
 
+# --- Project file (save/open, CONTRACTS.md §15) -----------------------------------------
+
+
+def test_save_as_writes_project_file(window, monkeypatch, tmp_path):
+    window.canvas.add_block("LP", fc=3000.0)
+    target = tmp_path / "myproject.iirfilt"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+
+    window._on_save_as()
+
+    assert target.is_file()
+    assert window._project_path == target
+    assert window.chain.dirty is False
+
+
+def test_save_as_cancelled_dialog_writes_nothing(window, monkeypatch, tmp_path):
+    window.canvas.add_block("LP")
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: ("", ""))
+
+    window._on_save_as()
+
+    assert list(tmp_path.iterdir()) == []
+    assert window._project_path is None
+
+
+def test_save_reuses_existing_path_without_dialog(window, monkeypatch, tmp_path):
+    window.canvas.add_block("LP")
+    target = tmp_path / "myproject.iirfilt"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+    window._on_save_as()
+
+    calls = []
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: calls.append(1) or (str(target), ""))
+    window.canvas.add_block("HP")
+
+    window._on_save()
+
+    assert calls == []  # no dialog on a plain Save once a path is known
+    assert window.chain.dirty is False
+
+
+def test_open_replaces_chain_in_place(window, monkeypatch, tmp_path):
+    """Open must mutate the existing FilterChain, never swap in a new one --
+    canvas/inspector hold a reference to the original instance."""
+    from project_file import save_project
+
+    original_chain = window.chain
+    source = FilterChain(fs=22_050.0)
+    source.add_block("HP", fc=500.0)
+    path = tmp_path / "other.iirfilt"
+    save_project(source, path)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (str(path), ""))
+
+    window._on_open()
+
+    assert window.chain is original_chain
+    assert window.canvas.chain is original_chain
+    assert window.chain.fs == 22_050.0
+    assert [b.kind for b in window.chain.blocks] == ["HP"]
+    assert window.chain.dirty is False
+
+
+def test_open_confirms_when_dirty_and_declines_keeps_state(window, monkeypatch, tmp_path):
+    window.canvas.add_block("LP")
+    window.chain.dirty = True
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
+    dialog_calls = []
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: dialog_calls.append(1) or ("", ""))
+
+    window._on_open()
+
+    assert dialog_calls == []  # never even opened the file dialog
+    assert len(window.chain.blocks) == 1
+
+
+def test_open_malformed_file_shows_error_without_crashing(window, monkeypatch, tmp_path):
+    bad = tmp_path / "bad.iirfilt"
+    bad.write_text("not json", encoding="utf-8")
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (str(bad), ""))
+    critical_calls = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: critical_calls.append(a[2] if len(a) > 2 else ""))
+
+    window._on_open()  # must not raise
+
+    assert len(critical_calls) == 1
+
+
+def test_open_cancelled_dialog_is_a_noop(window, monkeypatch):
+    window.canvas.add_block("LP")
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: ("", ""))
+
+    window._on_open()
+
+    assert len(window.chain.blocks) == 1
+
+
 # --- adjustable workspace layout (QSplitter) --------------------------------------------
 
 

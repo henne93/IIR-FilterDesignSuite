@@ -44,7 +44,7 @@ class Coefficients:
 
 @dataclass(frozen=True)
 class Q14Coefficients:
-    """Q14 fixed-point, scale = 16384. Storage width is int32_t (see CONTRACTS.md §7)."""
+    """Q14 fixed-point, scale = 16384. Storage width is int16_t (see CONTRACTS.md §7)."""
 
     b0: int
     b1: int

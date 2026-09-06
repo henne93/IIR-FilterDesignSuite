@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Sequence
 
 from filters.base import Q14Coefficients
 
@@ -117,11 +118,11 @@ class Q14Coeffs(ctypes.Structure):
     """CONTRACTS.md §8 ctypes ABI struct, matching q14_coeffs_t exactly."""
 
     _fields_ = [
-        ("b0", ctypes.c_int32),
-        ("b1", ctypes.c_int32),
-        ("b2", ctypes.c_int32),
-        ("a1", ctypes.c_int32),
-        ("a2", ctypes.c_int32),
+        ("b0", ctypes.c_int16),
+        ("b1", ctypes.c_int16),
+        ("b2", ctypes.c_int16),
+        ("a1", ctypes.c_int16),
+        ("a2", ctypes.c_int16),
     ]
 
 
@@ -130,10 +131,10 @@ class BiquadState(ctypes.Structure):
 
     _fields_ = [
         ("coeffs", Q14Coeffs),
-        ("x1", ctypes.c_int32),
-        ("x2", ctypes.c_int32),
-        ("y1", ctypes.c_int32),
-        ("y2", ctypes.c_int32),
+        ("x1", ctypes.c_int16),
+        ("x2", ctypes.c_int16),
+        ("y1", ctypes.c_int16),
+        ("y2", ctypes.c_int16),
     ]
 
 
@@ -152,8 +153,8 @@ def _configure_argtypes(lib: ctypes.CDLL) -> None:
 
     lib.biquad_q14_init.argtypes = [ctypes.POINTER(BiquadState), p_coeffs]
     lib.biquad_q14_init.restype = None
-    lib.biquad_q14_process.argtypes = [ctypes.POINTER(BiquadState), ctypes.c_int32]
-    lib.biquad_q14_process.restype = ctypes.c_int32
+    lib.biquad_q14_process.argtypes = [ctypes.POINTER(BiquadState), ctypes.c_int16]
+    lib.biquad_q14_process.restype = ctypes.c_int16
 
 
 def _raise_for_rc(rc: int, fn_name: str) -> None:
@@ -220,17 +221,25 @@ class NativeBackend:
         _raise_for_rc(rc, "filter_design_ap")
         return Q14Coefficients(out.b0, out.b1, out.b2, out.a1, out.a2)
 
+    def process_samples(self, coeffs: Q14Coefficients, samples: Sequence[int]) -> list[int]:
+        """Feeds an arbitrary sequence of Q14 input samples through
+        biquad_q14_process() sample-by-sample (fresh state) and returns the
+        raw Q14 output samples. Each sample must fit int16_t
+        ([-32768, 32767]) -- the native ABI is 16-bit-only (CONTRACTS.md §7).
+        """
+        state = BiquadState()
+        c_coeffs = Q14Coeffs(coeffs.b0, coeffs.b1, coeffs.b2, coeffs.a1, coeffs.a2)
+        self._lib.biquad_q14_init(ctypes.byref(state), ctypes.byref(c_coeffs))
+        ys = []
+        for x in samples:
+            ys.append(int(self._lib.biquad_q14_process(ctypes.byref(state), ctypes.c_int16(x))))
+        return ys
+
     def process_impulse(self, coeffs: Q14Coefficients, n_samples: int) -> list[int]:
         """Feeds a Q14 unit impulse (amplitude = Q14Coefficients.SCALE) through
         biquad_q14_process() sample-by-sample and returns the raw Q14 output
         samples. Drives the CONTRACTS.md §7 automated impulse-response test;
         not part of the app's own validation pipeline.
         """
-        state = BiquadState()
-        c_coeffs = Q14Coeffs(coeffs.b0, coeffs.b1, coeffs.b2, coeffs.a1, coeffs.a2)
-        self._lib.biquad_q14_init(ctypes.byref(state), ctypes.byref(c_coeffs))
-        ys = []
-        for n in range(n_samples):
-            x = Q14Coefficients.SCALE if n == 0 else 0
-            ys.append(int(self._lib.biquad_q14_process(ctypes.byref(state), ctypes.c_int32(x))))
-        return ys
+        samples = [Q14Coefficients.SCALE if n == 0 else 0 for n in range(n_samples)]
+        return self.process_samples(coeffs, samples)

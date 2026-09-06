@@ -17,14 +17,21 @@ Produces a timestamped `export_YYYYMMDD_HHMMSS/` directory containing:
                              holding its configured bandwidth fixed, clamped
                              at the `[100, fc_max(fs)]` domain edges
                              (CONTRACTS.md §6.3) -- see `_sweep_design_at()`.
+- `firmware/`             -- a complete, self-contained C package (generated
+                             coefficients, `biquad_q14.{h,c}`, a generated
+                             cascade-wiring `example.c`, `README.md`) that a
+                             firmware integrator can copy into another
+                             project as-is (CONTRACTS.md §10). See
+                             `render_firmware_package()` below.
 
-`filter_design.h` is deliberately coefficient-only and the export folder
-does not bundle `biquad_q14.h`/`biquad_q14.c` (CONCEPT.md §7's export file
-listing enumerates only the files above; `biquad_q14.{h,c}` stays firmware
-reference source in this repository's own `src/c/` tree, combined with a
-generated header by the firmware integrator, not duplicated per export --
-see README.md §6 and `tests/test_firmware_harness.py`, which proves that
-combination compiles, links, and runs correctly with GCC).
+The top-level `filter_design.h` above is deliberately coefficient-only, unchanged
+from the original design (CONCEPT.md §7's export file listing enumerates exactly
+the files above it; `biquad_q14.{h,c}` stays firmware reference source in this
+repository's own `src/c/` tree, not duplicated at the top level). The `firmware/`
+subfolder is a separate, additive output that *does* bundle a generated,
+standalone-package variant of `biquad_q14.{h,c}` -- see `render_firmware_package()`,
+`README.md` §6, and `tests/test_firmware_package.py`, which proves that package
+compiles, links, and runs correctly, fully standalone, with GCC.
 
 Two-stage design:
 
@@ -52,6 +59,7 @@ invalid disabled block never blocks export.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -79,6 +87,13 @@ from error_analysis import (
 )
 from filters.base import Coefficients, FilterDesign, NativeBackend, Q14Coefficients, fc_max
 from filters.chain import BlockKind, ChainBlock, FilterChain
+
+# Reference firmware source (CONTRACTS.md §7, §10) -- render_firmware_package()
+# below reads src/c/biquad_q14.{h,c} and src/c/filter_design.h from here.
+C_SRC_DIR = Path(__file__).resolve().parent.parent / "c"
+
+# Sample count for the illustrative demo main() in the generated firmware/example.c.
+FIRMWARE_EXAMPLE_N_SAMPLES = 32
 
 # CONTRACTS.md §11: response pass/fail badge threshold (max amplitude error).
 RESPONSE_PASS_THRESHOLD_DB = 0.1
@@ -300,20 +315,207 @@ def render_header(snapshot: ExportSnapshot) -> str:
     return text
 
 
-def _write_header(path: Path, snapshot: ExportSnapshot) -> None:
-    text = render_header(snapshot)
+def _write_text_lf(path: Path, text: str, *, encoding: str = "ascii") -> None:
+    """Writes `text` as raw bytes (not text mode) so LF line endings survive
+    unconditionally, even when this runs on Windows (CONTRACTS.md §10: "even
+    when generated on Windows"). `encoding="ascii"` (the default) matches the
+    generated coefficient header's own ASCII requirement; the firmware
+    package's other files (copied/derived from src/c/*, which contain
+    non-ASCII punctuation in comments) pass encoding="utf-8" instead."""
     try:
-        text.encode("ascii")
+        text.encode(encoding)
     except UnicodeEncodeError as exc:
-        raise ExportError(f"generated header content is not ASCII: {exc}") from exc
+        raise ExportError(f"content for {path} is not valid {encoding}: {exc}") from exc
     try:
-        # Write raw bytes (not text mode) so LF line endings survive
-        # unconditionally, even when this runs on Windows (CONTRACTS.md
-        # §10: "even when generated on Windows").
         with open(path, "wb") as f:
-            f.write(text.encode("ascii"))
+            f.write(text.encode(encoding))
     except OSError as exc:
-        raise ExportError(f"failed to write header {path}: {exc}") from exc
+        raise ExportError(f"failed to write {path}: {exc}") from exc
+
+
+def _write_header(path: Path, snapshot: ExportSnapshot) -> None:
+    _write_text_lf(path, render_header(snapshot))
+
+
+# -- Drop-in firmware package (firmware/ subfolder) ----------------------------
+#
+# Additive to the top-level export files above, which stay byte-for-byte
+# unchanged (CONCEPT.md §7's original file listing, CONTRACTS.md §10). This
+# subfolder bundles a complete, self-contained C package -- generated
+# coefficients, the biquad implementation, and a cascade-wiring example --
+# that a firmware integrator can copy into an external project as-is,
+# reversing the original "does not bundle biquad_q14.*" decision for this
+# new, separate output only. Never hand-duplicates biquad_q14.c's DSP logic:
+# it is copied verbatim from src/c/, so Feature-A-style changes to the real
+# implementation propagate to the next export automatically.
+
+_Q14_COEFFS_TYPEDEF_RE = re.compile(r"typedef struct \{.*?\}\s*q14_coeffs_t;", re.DOTALL)
+_BIQUAD_INCLUDE_LINE = '#include "filter_design.h"'
+
+
+def _extract_q14_coeffs_typedef(filter_design_h_text: str) -> str:
+    """Pulls the `q14_coeffs_t` typedef out of src/c/filter_design.h's text,
+    so the standalone package header (below) never hand-duplicates that
+    struct -- it's extracted from the real source, not retyped."""
+    match = _Q14_COEFFS_TYPEDEF_RE.search(filter_design_h_text)
+    if match is None:
+        raise ExportError(
+            "could not find the q14_coeffs_t typedef in src/c/filter_design.h -- "
+            "firmware package generation is out of sync with the source (expected a "
+            "'typedef struct { ... } q14_coeffs_t;' block)"
+        )
+    return match.group(0)
+
+
+def render_standalone_biquad_header(src_dir: Path = C_SRC_DIR) -> str:
+    """Renders a dependency-free variant of src/c/biquad_q14.h for the
+    firmware package: its `#include "filter_design.h"` line is replaced by a
+    `q14_coeffs_t` typedef extracted from the real src/c/filter_design.h,
+    rather than a second hand-typed copy of that struct. This avoids a real
+    naming collision -- the package also contains a *generated coefficient*
+    header also named `filter_design.h` (see render_firmware_package) -- and
+    means firmware doesn't pull in filter_design_lp/hp/bp/ap() (the
+    host-side, ctypes-only coefficient designer), which it never needs since
+    coefficients are already frozen constants.
+    """
+    try:
+        biquad_h_text = (src_dir / "biquad_q14.h").read_text(encoding="utf-8")
+        filter_design_h_text = (src_dir / "filter_design.h").read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ExportError(f"failed to read firmware source under {src_dir}: {exc}") from exc
+
+    if _BIQUAD_INCLUDE_LINE not in biquad_h_text:
+        raise ExportError(
+            f"expected {src_dir / 'biquad_q14.h'} to contain the literal line "
+            f"{_BIQUAD_INCLUDE_LINE!r} -- firmware package generation is out of sync "
+            "with the source"
+        )
+    typedef_block = _extract_q14_coeffs_typedef(filter_design_h_text)
+
+    standalone_block = (
+        "/* Standalone firmware-package variant: q14_coeffs_t is inlined below\n"
+        " * (extracted from src/c/filter_design.h at export time) instead of\n"
+        " * #include-ing that header -- firmware doesn't need\n"
+        " * filter_design_lp/hp/bp/ap() (coefficients are already frozen\n"
+        " * constants), so this file has no dependency beyond <stdint.h>. */\n"
+        f"{typedef_block}"
+    )
+    return biquad_h_text.replace(_BIQUAD_INCLUDE_LINE, standalone_block, 1)
+
+
+def render_firmware_example(snapshot: ExportSnapshot) -> str:
+    """Generates a C source demonstrating the specific chain in `snapshot`:
+    one biquad_q14_state_t per active block, initialized from its FILT<n>_*
+    coefficient defines, chained in series (stage n's output feeds stage
+    n+1, per CONTRACTS.md §12's series-only topology) through
+    `process_chain()` -- the function a real integration calls once per
+    sample. `main()` is an illustrative compile-and-run demo only.
+    """
+    lines = [
+        "/* Generated by IIR Filter Design Suite -- example integration for the",
+        f" * exported design (fs = {snapshot.fs:g} Hz). process_chain() is the",
+        " * function to call once per real sample in your own integration;",
+        " * main() below is only a compile-and-run demo. */",
+        "",
+        '#include "filter_design.h"',
+        '#include "biquad_q14.h"',
+        "#include <stdio.h>",
+        "",
+    ]
+    for block in snapshot.blocks:
+        n = block.position
+        lines.append(
+            f"static const q14_coeffs_t coeffs{n} = "
+            f"{{ FILT{n}_B0, FILT{n}_B1, FILT{n}_B2, FILT{n}_A1, FILT{n}_A2 }};"
+        )
+        lines.append(f"static biquad_q14_state_t state{n};")
+    lines.append("")
+    lines.append("void filter_chain_init(void) {")
+    for block in snapshot.blocks:
+        n = block.position
+        lines.append(f"    biquad_q14_init(&state{n}, &coeffs{n});")
+    lines.append("}")
+    lines.append("")
+    topology = " -> ".join(f"FILT{b.position}" for b in snapshot.blocks)
+    lines.append(f"/* Series cascade, matching this design's chain order: {topology} */")
+    lines.append("int16_t process_chain(int16_t x) {")
+    lines.append("    int16_t y = x;")
+    for block in snapshot.blocks:
+        n = block.position
+        lines.append(f"    y = biquad_q14_process(&state{n}, y);")
+    lines.append("    return y;")
+    lines.append("}")
+    lines.append("")
+    lines.append(f"/* Illustrative only: runs a {FIRMWARE_EXAMPLE_N_SAMPLES}-sample Q14 unit")
+    lines.append(" * impulse through the cascade and prints each output sample, one per line. */")
+    lines.append("int main(void) {")
+    lines.append("    filter_chain_init();")
+    lines.append(f"    for (int n = 0; n < {FIRMWARE_EXAMPLE_N_SAMPLES}; n++) {{")
+    lines.append("        int16_t x = (n == 0) ? (int16_t)Q14_SCALE : 0;")
+    lines.append("        int16_t y = process_chain(x);")
+    lines.append('        printf("%d\\n", (int)y);')
+    lines.append("    }")
+    lines.append("    return 0;")
+    lines.append("}")
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def render_firmware_readme(snapshot: ExportSnapshot) -> str:
+    topology = " -> ".join(f"FILT{b.position} ({b.kind})" for b in snapshot.blocks)
+    return (
+        "# Firmware package\n"
+        "\n"
+        f"Generated by IIR Filter Design Suite, {snapshot.generated_at.isoformat()}.\n"
+        f"fs = {snapshot.fs:g} Hz. Chain topology (series): {topology}.\n"
+        "\n"
+        "This folder is self-contained -- copy it into another project as-is, no\n"
+        "other file from this suite is required.\n"
+        "\n"
+        "## Contents\n"
+        "\n"
+        "- `filter_design.h` -- generated Q14 coefficients for this design\n"
+        "  (`FILT<n>_*` defines). Same content as the sibling top-level file.\n"
+        "- `biquad_q14.h` / `biquad_q14.c` -- the Direct Form 1 Q14 biquad\n"
+        "  implementation. This header variant inlines its own `q14_coeffs_t`\n"
+        "  definition instead of including a separate type header, so this\n"
+        "  folder has no dependency outside itself.\n"
+        "- `example.c` -- generated integration example: `filter_chain_init()`\n"
+        "  builds the cascade's state from the coefficients above;\n"
+        "  `process_chain(x)` runs one Q14 sample through the full series\n"
+        "  cascade and returns the result. `main()` is an illustrative demo\n"
+        "  only (feeds a unit impulse, prints the output) -- not part of the\n"
+        "  integration API.\n"
+        "\n"
+        "## Integration\n"
+        "\n"
+        "1. Copy this folder into your firmware project.\n"
+        "2. Call `filter_chain_init()` once at startup.\n"
+        "3. Call `process_chain(x)` once per input sample in your real-time loop.\n"
+        "4. Remove or replace `example.c`'s `main()` -- it's a compile-and-run\n"
+        "   demo, not part of the integration API.\n"
+    )
+
+
+def render_firmware_package(snapshot: ExportSnapshot, output_dir: Path, *, src_dir: Path = C_SRC_DIR) -> Path:
+    """Writes the `firmware/` subfolder (see module docstring) under
+    `output_dir` and returns its path."""
+    firmware_dir = output_dir / "firmware"
+    try:
+        firmware_dir.mkdir(parents=True, exist_ok=False)
+    except OSError as exc:
+        raise ExportError(f"failed to create firmware package directory {firmware_dir}: {exc}") from exc
+
+    _write_text_lf(firmware_dir / "filter_design.h", render_header(snapshot))
+    _write_text_lf(firmware_dir / "biquad_q14.h", render_standalone_biquad_header(src_dir), encoding="utf-8")
+    try:
+        biquad_c_text = (src_dir / "biquad_q14.c").read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ExportError(f"failed to read {src_dir / 'biquad_q14.c'}: {exc}") from exc
+    _write_text_lf(firmware_dir / "biquad_q14.c", biquad_c_text, encoding="utf-8")
+    _write_text_lf(firmware_dir / "example.c", render_firmware_example(snapshot), encoding="utf-8")
+    _write_text_lf(firmware_dir / "README.md", render_firmware_readme(snapshot), encoding="utf-8")
+
+    return firmware_dir
 
 
 # -- PNG plots -----------------------------------------------------------------
@@ -420,7 +622,7 @@ def render_pdf(
         if png is not None and png.is_file():
             story.append(Image(str(png), width=5.0 * inch, height=3.75 * inch))
 
-        table_data = [["coefficient", "ideal (float64)", "Q14 (int32)", "Q14 (float)"]]
+        table_data = [["coefficient", "ideal (float64)", "Q14 (int16)", "Q14 (float)"]]
         for coef in COEFFICIENT_NAMES:
             ideal_v = getattr(block.ideal_coefficients, coef)
             q14_v = getattr(block.q14_coefficients, coef)
@@ -514,6 +716,7 @@ class ExportResult:
     combined_bode_png: Path
     block_bode_pngs: Mapping[int, Path]
     error_sweep_pngs: Mapping[int, Path]
+    firmware_dir: Path
 
 
 def _make_export_dir(output_root: Path, generated_at: datetime) -> Path:
@@ -588,6 +791,8 @@ def export_design(
     header_path = export_dir / "filter_design.h"
     _write_header(header_path, snapshot)
 
+    firmware_dir = render_firmware_package(snapshot, export_dir)
+
     pdf_path = export_dir / "report.pdf"
     render_pdf(snapshot, pdf_path, combined_png, block_pngs)
 
@@ -599,4 +804,5 @@ def export_design(
         combined_bode_png=combined_png,
         block_bode_pngs=MappingProxyType(block_pngs),
         error_sweep_pngs=MappingProxyType(sweep_pngs),
+        firmware_dir=firmware_dir,
     )

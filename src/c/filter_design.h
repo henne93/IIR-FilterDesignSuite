@@ -7,8 +7,13 @@ extern "C" {
 
 #define Q14_SCALE 16384
 
+/* Storage width is int16_t: a full-domain sweep of every LP/HP/BP/AP design in
+ * the supported parameter range (CONTRACTS.md §5) gives a true worst-case
+ * |coefficient| of 1.9958 (AP a1/b1), which fits int16 Q14 (max representable
+ * ~1.99994) with ~0.004 headroom -- tight but real, and locked by an
+ * automated regression sweep (tests/test_native_coefficients.py). */
 typedef struct {
-    int32_t b0, b1, b2, a1, a2;   /* Q14 fixed-point, scale = 16384 */
+    int16_t b0, b1, b2, a1, a2;   /* Q14 fixed-point, scale = 16384 */
 } q14_coeffs_t;
 
 /* Return 0 on success, negative on invalid input (defense-in-depth only —

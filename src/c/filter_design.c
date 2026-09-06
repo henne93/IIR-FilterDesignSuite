@@ -19,18 +19,22 @@
 #endif
 
 /* Round-half-away-from-zero (roundf) into Q14, per CONTRACTS.md §7.
- * Storage is int32_t and never overflows within the contracted §5 parameter
- * domain; the saturation below is a defensive-only guard against a
- * hypothetical out-of-domain input reaching this far. */
-static int32_t q14_quantize(float x) {
+ * Storage is int16_t. Unlike the original int32_t storage (which had huge
+ * headroom), int16_t is genuinely tight: a full-domain sweep of every
+ * LP/HP/BP/AP design gives a true worst-case |coefficient| of 1.9958 (AP
+ * a1/b1), i.e. ~32712 in Q14 units, ~55 counts (~0.17%) under INT16_MAX
+ * (32767) -- never actually reached in-domain (regression-guarded by
+ * tests/test_native_coefficients.py), but the saturation below is no longer
+ * purely hypothetical the way it was at int32_t width. */
+static int16_t q14_quantize(float x) {
     double scaled = (double)roundf(x * (float)Q14_SCALE);
-    if (scaled >= (double)INT32_MAX) {
-        return INT32_MAX;
+    if (scaled >= (double)INT16_MAX) {
+        return INT16_MAX;
     }
-    if (scaled <= (double)INT32_MIN) {
-        return INT32_MIN;
+    if (scaled <= (double)INT16_MIN) {
+        return INT16_MIN;
     }
-    return (int32_t)scaled;
+    return (int16_t)scaled;
 }
 
 static int check_fs(float fs) {

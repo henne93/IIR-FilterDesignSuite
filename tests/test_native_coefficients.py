@@ -151,6 +151,42 @@ def test_response_error_full_range_lp_hp_ap(native_backend, name, cls, extra):
     assert max_err < RESPONSE_ERROR_FULL_RANGE_DB, f"{name}: max full-range response error {max_err:.3f} dB"
 
 
+# Locked int16 headroom regression bound (CONTRACTS.md §7): a full-domain
+# sweep (this test) measures a true worst case of ~32712 Q14 counts (AP
+# a1/b1, near Q=4.0, fc near 100 Hz) -- comfortably under INT16_MAX (32767)
+# but tight. This bound catches any future formula/range change that erodes
+# that headroom before it becomes a silent int16 saturation in the field.
+INT16_HEADROOM_BOUND = 32750
+AP_Q_SWEEP = np.linspace(0.25, 4.0, 12)
+
+
+def test_no_coefficient_saturates_int16_across_domain(native_backend):
+    """Regression guard for the int16_t q14_coeffs_t storage width
+    (CONTRACTS.md §7): no in-domain LP/HP/BP/AP design's quantized
+    coefficient may approach INT16_MAX/INT16_MIN (32767/-32768)."""
+    max_abs = 0
+
+    def track(q14):
+        nonlocal max_abs
+        max_abs = max(max_abs, max(abs(getattr(q14, k)) for k in ("b0", "b1", "b2", "a1", "a2")))
+
+    for fs in FS_SWEEP:
+        hi = fc_max(fs)
+        fcs = np.linspace(100.0, hi, 40)
+        for fc in fcs:
+            track(LowPassFilter(fs=fs, fc=fc).q14_coefficients(native_backend))
+            track(HighPassFilter(fs=fs, fc=fc).q14_coefficients(native_backend))
+            for q in AP_Q_SWEEP:
+                track(AllPassFilter(fs=fs, fc=fc, Q=q).q14_coefficients(native_backend))
+        for f_low in np.linspace(100.0, hi * 0.9, 20):
+            for f_high in np.linspace(f_low + 10.0, hi, 5):
+                if f_high <= f_low:
+                    continue
+                track(BandPassFilter(fs=fs, f_low=f_low, f_high=f_high).q14_coefficients(native_backend))
+
+    assert max_abs < INT16_HEADROOM_BOUND, f"max |Q14 coefficient| {max_abs} approached int16 saturation"
+
+
 def test_response_error_bp(native_backend):
     max_err = 0.0
     for fs in FS_SWEEP:

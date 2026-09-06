@@ -19,11 +19,15 @@ extern "C" {
  * Samples and state (x1, x2, y1, y2) are Q14 fixed-point, same scale
  * (Q14_SCALE = 16384) as q14_coeffs_t, e.g. a full-scale unit sample is
  * represented as 16384.
+ *
+ * All types here are int16_t/int32_t only -- no 64-bit type appears anywhere
+ * in this file, by deliberate choice (see biquad_q14_process below for the
+ * accumulator trade-off this implies).
  */
 typedef struct {
     q14_coeffs_t coeffs;
-    int32_t x1, x2;   /* x[n-1], x[n-2] */
-    int32_t y1, y2;   /* y[n-1], y[n-2] */
+    int16_t x1, x2;   /* x[n-1], x[n-2] */
+    int16_t y1, y2;   /* y[n-1], y[n-2] */
 } biquad_q14_state_t;
 
 void biquad_q14_init(biquad_q14_state_t *state, const q14_coeffs_t *coeffs);
@@ -34,18 +38,34 @@ void biquad_q14_init(biquad_q14_state_t *state, const q14_coeffs_t *coeffs);
  * (Direct Form 1; minus signs on the a-terms match the CONTRACTS.md §2
  * denominator convention 1 + a1*z^-1 + a2*z^-2) and returns y[n].
  *
- * Each of the 5 coefficient*sample products is a Q28 value; all 5 are
- * summed in a widened int64_t accumulator so no partial sum can overflow.
+ * Each of the 5 coefficient*sample products is computed as int32_t (safe:
+ * int16 x int16 has magnitude at most ~2^30, far inside int32_t range). The
+ * 5 products are then summed via saturating add/subtract (see
+ * sat_add_i32/sat_sub_i32 in biquad_q14.c), clamping to [INT32_MIN,
+ * INT32_MAX] at every step instead of wrapping.
+ *
+ * This is a deliberate, informed trade-off: the theoretical worst-case
+ * magnitude of the 5-term sum (~5.4e9, using the full Q14 coefficient range)
+ * is about 2.5x over int32_t's range, so a plain `int32_t acc = ...+...;`
+ * sum would risk genuine signed-integer-overflow UB. A 64-bit accumulator
+ * would rule that out entirely (and costs nothing extra on Cortex-M4, which
+ * has single-cycle 32x32->64-bit MAC hardware) -- that was the recommended
+ * option, but a strict "no 64-bit types anywhere" requirement was chosen
+ * instead. The saturating adds/subtracts above guarantee *well-defined*
+ * behavior (no UB, no crash) but do NOT constitute a formal proof that
+ * saturation is unreachable for every in-domain design; no such proof (a
+ * per-filter-type pole/gain stability bound) has been derived. See
+ * tests/test_native_saturation_stress.py for an empirical, bit-exact check
+ * of this accumulator against a Python reference under adversarial
+ * full-scale alternating input, including how often the clamp actually
+ * triggers.
+ *
  * The Q28 accumulator is then rescaled to Q14 by dividing by 2^14 with
  * round-half-away-from-zero (matching the §7 rounding convention used for
  * coefficient quantization), and the Q14 result is saturated to
- * [INT32_MIN, INT32_MAX] before being written into the state and returned.
- * Saturation is a defensive guard: for coefficients produced by the
- * filter_design_* functions from any input inside the CONTRACTS.md §5
- * parameter domain, driven by a bounded input sample, it is not expected
- * to trigger.
+ * [INT16_MIN, INT16_MAX] before being written into the state and returned.
  */
-int32_t biquad_q14_process(biquad_q14_state_t *state, int32_t x);
+int16_t biquad_q14_process(biquad_q14_state_t *state, int16_t x);
 
 #ifdef __cplusplus
 }

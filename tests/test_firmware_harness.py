@@ -3,12 +3,15 @@
 `filter_design.h` (produced by `export.render_header()`) is coefficient-only
 -- plain `#define FILT<n>_*` integer literals plus `Q14_SCALE`/
 `Q14_TO_FLOAT` (CONTRACTS.md §10). It does not define `q14_coeffs_t`, the
-biquad state struct, or `process()`, and the per-design `export_YYYYMMDD_*`
-directory does not bundle `biquad_q14.{h,c}` alongside it (matching
-CONCEPT.md §7's explicit export file listing, which lists only
+biquad state struct, or `process()`, and the **top-level** per-design
+`export_YYYYMMDD_*` directory does not bundle `biquad_q14.{h,c}` alongside
+it (matching CONCEPT.md §7's explicit export file listing, which lists only
 `filter_design.h`). `biquad_q14.{h,c}` stays firmware-reference source in
 this suite's own `src/c/` tree -- a firmware integrator combines the two
-themselves, exactly as this test does.
+themselves, exactly as this test does. (The export directory's `firmware/`
+subfolder *does* bundle a generated, standalone package -- see
+`tests/test_firmware_package.py` -- but that is a separate, additive output;
+this test is only about the top-level generated header.)
 
 Two other tests already cover the pieces on either side of that seam:
   - `test_export.py::test_generated_header_compiles_with_gcc` proves the

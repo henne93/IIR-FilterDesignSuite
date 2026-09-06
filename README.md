@@ -134,23 +134,20 @@ default before importing PyQt6, so a plain `pytest` run is headless too —
 the explicit environment variable above is the reproducible, explicit form
 to use in CI configuration.)
 
-## 6. Generated firmware header: coefficient-only by design
+## 6. Generated firmware header, and the `firmware/` drop-in package
 
-`export_design()` writes a per-design `export_YYYYMMDD_HHMMSS/` folder
-containing `filter_design.h` — plain integer `#define FILT<n>_B0/.../A2`
-literals plus `Q14_SCALE`/`Q14_TO_FLOAT` (`docs/CONTRACTS.md` §10). It is
-intentionally **coefficient-only** and does not bundle `biquad_q14.h`/
-`biquad_q14.c` into the export folder:
+`export_design()` writes a per-design `export_YYYYMMDD_HHMMSS/` folder. The
+top-level `filter_design.h` in it is plain integer `#define FILT<n>_B0/.../A2`
+literals plus `Q14_SCALE`/`Q14_TO_FLOAT` (`docs/CONTRACTS.md` §10) —
+intentionally **coefficient-only**, and the top level does not bundle
+`biquad_q14.h`/`biquad_q14.c` alongside it:
 
 - CONCEPT.md §7's export directory listing enumerates exactly
   `report.pdf`, `filter_design.h`, `bode_combined.png`, `bode_<type>_<n>.png`,
-  and `error_sweep_<n>.png` — no `biquad_q14.*` entry.
-- `biquad_q14.{h,c}` is reference firmware source that lives once, in this
-  repository's `src/c/` tree (`docs/CONTRACTS.md` §7) — duplicating it into
-  every export folder would create N copies to keep in sync for no benefit;
-  a firmware integrator combines the generated header with `src/c/biquad_q14.{h,c}`
-  from this repository themselves, the same way `tests/test_firmware_harness.py`
-  does for verification.
+  and `error_sweep_<n>.png` at the top level — no `biquad_q14.*` entry there.
+- A firmware integrator can still combine the top-level generated header
+  with `src/c/biquad_q14.{h,c}` from this repository themselves, the same
+  way `tests/test_firmware_harness.py` does for verification.
 
 That combination is proven, not just asserted: `tests/test_firmware_harness.py`
 compiles a small harness that `#include`s a freshly generated
@@ -159,9 +156,44 @@ compiles a small harness that `#include`s a freshly generated
 resulting binary, and cross-checks its output against the same
 `NativeBackend.process_impulse()` ctypes path used elsewhere in this suite.
 
+### The `firmware/` subfolder — a complete, self-contained package
+
+Every export also writes a `firmware/` subfolder containing a version of the
+design meant to be copied into an external project as-is, no other file from
+this repository required:
+
+| File | What it is |
+|---|---|
+| `filter_design.h` | Same generated coefficients as the top-level file (byte-identical). |
+| `biquad_q14.h` | A standalone variant of `src/c/biquad_q14.h`: its `q14_coeffs_t` is inlined (extracted from `src/c/filter_design.h` at export time) instead of `#include`-ing a separate header — this avoids a naming collision with the coefficient header of the same name sitting right next to it, and avoids pulling in the host-side design/quantization functions firmware never needs. |
+| `biquad_q14.c` | A byte-for-byte verbatim copy of `src/c/biquad_q14.c` — never a hand-maintained second copy, so a change to the real implementation propagates to the next export automatically. |
+| `example.c` | Generated for the *specific* chain being exported: one `biquad_q14_state_t` per active block, wired in series (`process_chain()`), plus an illustrative demo `main()`. |
+| `README.md` | Integration instructions for the folder. |
+
+This is proven fully self-contained, not just asserted: `tests/test_firmware_package.py`
+copies the generated `firmware/` folder to a location with no relationship to
+this repository, compiles it there with `gcc -Wall -Wextra -Werror` and `-I`
+pointed only at that copy (no reference to `src/c/` at all), runs the
+binary, and cross-checks its output bit-exactly against the same
+`NativeBackend.process_samples()` ctypes path used elsewhere in this suite.
+
 ## 7. Out of scope (v1)
 
-Save/load, undo/redo, real-time audio preview, parallel (summing) topology,
-filter orders other than 2nd, and filter families other than Butterworth
-are all explicitly out of scope — see `docs/CONCEPT.md` §9 and
-`docs/CONTRACTS.md` §13.
+Undo/redo, real-time audio preview, parallel (summing) topology, filter
+orders other than 2nd, and filter families other than Butterworth are all
+explicitly out of scope — see `docs/CONCEPT.md` §9 and `docs/CONTRACTS.md`
+§13.
+
+## 8. Saving and opening project files
+
+The toolbar's **Open** / **Save** / **Save As** actions read and write a
+versioned JSON project file (`.iirfilt`) capturing a filter chain's full
+state — sample rate, and every block's kind, parameters, and enabled flag,
+in chain order, including any currently-invalid or disabled blocks
+(`docs/CONTRACTS.md` §15). It does not capture UI layout (splitter sizes,
+selected tab, window geometry) — only the chain model itself.
+
+Opening a project follows the same unsaved-changes confirmation as **Reset**
+if the current chain is dirty, then replaces the chain's contents in place
+(the app never constructs a new chain object, so canvas/inspector stay
+wired up correctly).
