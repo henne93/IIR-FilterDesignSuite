@@ -23,7 +23,7 @@ import pytest
 from PyQt6.QtCore import QMimeData, QPointF, Qt
 from PyQt6.QtGui import QDropEvent
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox, QSplitter, QToolBar
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QSplitter
 
 from filters import FilterChain
 from ui import app as app_module
@@ -81,11 +81,11 @@ def test_application_startup(window):
 
 
 def test_no_validate_action_exists(window):
-    """The Validate toolbar action was removed -- validation is automatic (CONTRACTS.md §13)."""
+    """The Validate action was removed -- validation is automatic (CONTRACTS.md §13)."""
     assert not hasattr(window, "validate_action")
     assert not hasattr(window, "_on_validate")
-    toolbar_texts = [action.text() for action in window.findChild(QToolBar).actions()]
-    assert "Validate" not in toolbar_texts
+    menu_texts = [action.text() for menu in window.menuBar().findChildren(QMenu) for action in menu.actions()]
+    assert "Validate" not in menu_texts
 
 
 # --- adding filter types ------------------------------------------------------

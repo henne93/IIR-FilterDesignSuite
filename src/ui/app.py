@@ -1,7 +1,7 @@
 """PyQt6 application shell (Phase 5, CONTRACTS.md §13).
 
-Owns the chain-wide `fs` input, the Export/Clear/Reset toolbar, and
-dirty-state tracking. `FilterChain` (src/python/filters/chain.py) remains
+Owns the chain-wide `fs` input, the File/Edit menu bar, and dirty-state
+tracking. `FilterChain` (src/python/filters/chain.py) remains
 the single source of truth -- this module never duplicates filter equations
 or keeps independent widget-side parameters (CONTRACTS.md §12).
 
@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QDoubleValidator
+from PyQt6.QtGui import QAction, QDoubleValidator
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -46,7 +46,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QScrollArea,
     QSplitter,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -131,7 +130,8 @@ class MainWindow(QMainWindow):
         self.backend = backend if backend is not None else _get_shared_native_backend()[0]
         self.inspector = Inspector(self.chain, self.backend)
 
-        self._build_toolbar()
+        self._build_actions()
+        self._build_menu_bar()
         self._build_central_widget()
         self.statusBar()
 
@@ -177,32 +177,38 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
 
-    def _build_toolbar(self) -> None:
-        toolbar = QToolBar("Main")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-
-        self.open_action = toolbar.addAction("Open")
+    def _build_actions(self) -> None:
+        self.open_action = QAction("Open", self)
         self.open_action.triggered.connect(self._on_open)
 
-        self.save_action = toolbar.addAction("Save")
+        self.save_action = QAction("Save", self)
         self.save_action.triggered.connect(self._on_save)
 
-        self.save_as_action = toolbar.addAction("Save As")
+        self.save_as_action = QAction("Save As", self)
         self.save_as_action.triggered.connect(self._on_save_as)
 
-        toolbar.addSeparator()
-
-        self.export_action = toolbar.addAction("Export")
+        self.export_action = QAction("Export", self)
         self.export_action.triggered.connect(self._on_export)
 
-        toolbar.addSeparator()
-
-        self.clear_action = toolbar.addAction("Clear")
+        self.clear_action = QAction("Clear", self)
         self.clear_action.triggered.connect(self.canvas.clear)
 
-        self.reset_action = toolbar.addAction("Reset")
+        self.reset_action = QAction("Reset", self)
         self.reset_action.triggered.connect(self._on_reset)
+
+    def _build_menu_bar(self) -> None:
+        menu_bar = self.menuBar()
+
+        file_menu = menu_bar.addMenu("&File")
+        file_menu.addAction(self.open_action)
+        file_menu.addAction(self.save_action)
+        file_menu.addAction(self.save_as_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.export_action)
+
+        edit_menu = menu_bar.addMenu("&Edit")
+        edit_menu.addAction(self.clear_action)
+        edit_menu.addAction(self.reset_action)
 
     # -- reactions to model changes -----------------------------------------
 
