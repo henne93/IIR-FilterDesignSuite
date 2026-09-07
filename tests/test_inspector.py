@@ -66,7 +66,7 @@ def test_combined_tab_always_present_and_first(inspector):
     assert isinstance(inspector._panels[None], CombinedInspectorPanel)
 
 
-@pytest.mark.parametrize("kind", ["LP", "HP", "BP", "AP"])
+@pytest.mark.parametrize("kind", ["LP", "HP", "BP", "AP", "PK"])
 def test_per_block_tab_added_for_each_kind(inspector, chain, kind):
     block_id = chain.add_block(kind)
     inspector.refresh()
@@ -138,6 +138,15 @@ def test_ap_form_has_fc_and_q_fields(inspector, chain):
     panel = inspector._panels[block_id]
 
     assert set(panel._fields.keys()) == {"fc", "Q"}
+
+
+def test_pk_form_has_fc_q_and_gain_fields(inspector, chain):
+    block_id = chain.add_block("PK", fc=1_000.0, Q=1.0, gain_db=6.0)
+    inspector.refresh()
+    panel = inspector._panels[block_id]
+
+    assert set(panel._fields.keys()) == {"fc", "Q", "gain_db"}
+    assert panel._fields["gain_db"].text() == "6"
 
 
 # --- BP derived values -----------------------------------------------------------------
@@ -219,6 +228,35 @@ def test_ap_non_numeric_q_rejected_without_touching_model(inspector, chain):
 
     assert chain.get_block(block_id).params["Q"] == 1.0  # model untouched
     assert not panel.error_label.isHidden()
+
+
+# --- PK gain validation -----------------------------------------------------------------
+
+
+def test_pk_invalid_gain_shows_inline_error_without_crashing(inspector, chain):
+    block_id = chain.add_block("PK", fc=1_000.0, Q=1.0, gain_db=6.0)
+    inspector.refresh()
+    panel = inspector._panels[block_id]
+
+    _edit(panel._fields["gain_db"], "20.0")  # GAIN_MAX_DB is 15.0
+
+    assert not chain.get_block(block_id).is_valid
+    assert not panel.error_label.isHidden()
+    assert "gain_db" in panel.error_label.text()
+
+
+def test_pk_gain_fixed_clears_error(inspector, chain):
+    block_id = chain.add_block("PK", fc=1_000.0, Q=1.0, gain_db=6.0)
+    inspector.refresh()
+    panel = inspector._panels[block_id]
+
+    _edit(panel._fields["gain_db"], "20.0")
+    assert panel.error_label.text() != ""
+
+    _edit(panel._fields["gain_db"], "-6.0")
+
+    assert chain.get_block(block_id).is_valid
+    assert panel.error_label.isHidden()
 
 
 # --- parameter updates through the model -----------------------------------------------
@@ -345,6 +383,19 @@ def test_refresh_validation_computes_combined_response_error(inspector, chain):
 
 def test_bp_block_shows_coefficient_sweep_and_response_error(inspector, chain):
     block_id = chain.add_block("BP", f_low=1_000.0, f_high=2_000.0)
+    inspector.refresh()
+
+    inspector.refresh_validation()
+
+    panel = inspector._panels[block_id]
+    assert "Response error vs Q14" in panel.metrics.response_label.text()
+    assert "Coefficient sweep" in panel.metrics.sweep_label.text()
+    sweep = inspector._sweep_cache[block_id]
+    assert 100.0 <= sweep.worst_frequency_hz <= fc_max(chain.fs)
+
+
+def test_pk_block_shows_coefficient_sweep_and_response_error(inspector, chain):
+    block_id = chain.add_block("PK", fc=1_000.0, Q=1.0, gain_db=6.0)
     inspector.refresh()
 
     inspector.refresh_validation()

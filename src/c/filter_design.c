@@ -127,3 +127,31 @@ int filter_design_ap(float fc, float fs, float q, q14_coeffs_t *out) {
     store(out, b0, b1, b2, a1, a2);
     return 0;
 }
+
+/* Peaking EQ (bell boost/cut), CONTRACTS.md §3: bilinear transform of the
+ * analog prototype H(s) = (s^2 + (A/Q)s + 1) / (s^2 + s/(A*Q) + 1),
+ * A = 10^(gain_db/40), via s = (1/K)*(1-z^-1)/(1+z^-1), K = tan(pi*fc/fs) --
+ * same prewarping family as LP/HP/BP, unlike AP's un-prewarped w0. b1 and a1
+ * are identical because the z^-1 term (2*(K^2-1)) is common to numerator and
+ * denominator before normalization -- not a bug. */
+int filter_design_pk(float fc, float fs, float q, float gain_db, q14_coeffs_t *out) {
+    int rc;
+    if ((rc = check_fs(fs)) != 0) return rc;
+    if ((rc = check_edge(fc, fs)) != 0) return rc;
+    if (!(q > 0.0f)) return -4;
+
+    float K = tanf((float)M_PI * fc / fs);
+    float A = powf(10.0f, gain_db / 40.0f);
+    float K2 = K * K;
+    float alpha_num = (A / q) * K;
+    float alpha_den = K / (A * q);
+    float norm = K2 + alpha_den + 1.0f;
+    float b0 = (K2 + alpha_num + 1.0f) / norm;
+    float b1 = 2.0f * (K2 - 1.0f) / norm;
+    float b2 = (K2 - alpha_num + 1.0f) / norm;
+    float a1 = b1;
+    float a2 = (K2 - alpha_den + 1.0f) / norm;
+
+    store(out, b0, b1, b2, a1, a2);
+    return 0;
+}

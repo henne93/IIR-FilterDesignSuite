@@ -79,6 +79,7 @@ class NativeBackend(Protocol):
     def design_hp(self, fc: float, fs: float) -> Q14Coefficients: ...
     def design_bp(self, f_low: float, f_high: float, fs: float) -> Q14Coefficients: ...
     def design_ap(self, fc: float, fs: float, q: float) -> Q14Coefficients: ...
+    def design_pk(self, fc: float, fs: float, q: float, gain_db: float) -> Q14Coefficients: ...
 
 
 def _response_from_coefficients(coeffs: Coefficients, freq_hz: np.ndarray, fs: float) -> FrequencyResponse:
@@ -92,7 +93,7 @@ def _response_from_coefficients(coeffs: Coefficients, freq_hz: np.ndarray, fs: f
 
 
 class FilterDesign(ABC):
-    kind: ClassVar[Literal["LP", "HP", "BP", "AP"]]
+    kind: ClassVar[Literal["LP", "HP", "BP", "AP", "PK"]]
 
     def __init__(self, fs: float, **params: float) -> None:
         self.fs: float = float(fs)

@@ -31,6 +31,7 @@ All filters are **2nd-order Butterworth** unless noted. All support both a
 | **High-Pass (HP)** | `fc` [Hz] | Same topology, numerator sign-flipped |
 | **Band-Pass (BP)** | `f_low`, `f_high` [Hz] | `fc = √(f_low · f_high)`, `Q = fc / (f_high − f_low)` |
 | **All-Pass (AP)** | `fc` [Hz], `Q` (damping) | Flat magnitude, adjustable phase. 2nd-order phase shifter; `Q` defaults to Butterworth damping. |
+| **Peak (PK)** | `fc` [Hz], `Q`, `gain` [dB] | Parametric bell boost/cut. Not a Butterworth design — bilinear-transformed peaking-EQ prototype, pre-warped like LP/HP/BP. `|H(fc)|` = exactly `gain` dB; returns to 0 dB at DC and Nyquist. |
 
 ### Band-Pass parameterization
 - User enters `f_low` and `f_high`; `fc` and `Q` are derived and displayed live.
@@ -47,6 +48,23 @@ All filters are **2nd-order Butterworth** unless noted. All support both a
   `0.25 <= Q <= 4.0` to prevent invalid or impractical designs while retaining useful
   control over the phase transition.
 - The selected `Q` is used consistently by the scipy ideal calculation, the C coefficient calculation, plots, validation, and export.
+
+### Peak parameterization
+- Parametric bell boost/cut around `fc`, with adjustable `Q` (bandwidth) and `gain` (dB).
+- Not a Butterworth design (no such thing as a "Butterworth peak" filter) — derived from
+  the analog peaking-EQ prototype `H(s) = (s² + (A/Q)s + 1) / (s² + s/(A·Q) + 1)`,
+  `A = 10^(gain/40)`, bilinear-transformed with pre-warping `K = tan(π·fc/fs)` — the same
+  prewarped family as LP/HP/BP (unlike All-Pass, which uses the un-prewarped digital `w0`).
+- `|H(fc)|` = exactly the configured `gain` in dB; the response returns to exactly 0 dB at
+  DC and at Nyquist, independent of `Q` or `gain`.
+- `Q` range is `0.8 <= Q <= 4.0` (default `1.0`) — narrower than All-Pass's `[0.25, 4.0]`:
+  at low `Q` combined with high `|gain|`, Peak's coefficients are not bounded by ~2.0 the
+  way every other filter type's are (e.g. `Q=0.25` at `gain=+15 dB` would push a
+  coefficient to ~3.11, well past what Q14 int16 storage can represent) — see
+  CONTRACTS.md §5 for the full derivation. `gain` is constrained to
+  `-15 dB <= gain <= 15 dB`, default `+6 dB`.
+- The selected `Q`/`gain` are used consistently by the scipy ideal calculation, the C
+  coefficient calculation, plots, validation, and export — same rule as All-Pass's `Q`.
 
 ---
 
@@ -65,7 +83,8 @@ IIR-FilterDesignSuite/
 │   │   │   ├── lowpass.py         ButterworthLP
 │   │   │   ├── highpass.py        ButterworthHP
 │   │   │   ├── bandpass.py        ButterworthBP
-│   │   │   └── allpass.py         ButterworthAP
+│   │   │   ├── allpass.py         ButterworthAP
+│   │   │   └── peak.py            PeakFilter (parametric EQ, not Butterworth)
 │   │   ├── c_codegen.py           Compiles src/c/ → shared lib; exposes Q14 design fns
 │   │   ├── error_analysis.py      Error sweep: ideal vs Q14 across full fc range
 │   │   └── export.py              PDF report + C header (.h) + PNG export
@@ -129,7 +148,7 @@ IIR-FilterDesignSuite/
 ### Panel behaviour
 
 **Palette (left)**
-- Four static draggable buttons: LP, HP, BP, AP.
+- Five static draggable buttons: LP, HP, BP, AP, PK.
 - Drag onto canvas to instantiate a block with default parameters.
 
 **Design Canvas (center)**
@@ -158,7 +177,7 @@ IIR-FilterDesignSuite/
 
 ## 5. C Coefficient Design
 
-All four filter types use the **bilinear transform** with pre-warping at fc.
+All five filter types use the **bilinear transform** with pre-warping at fc.
 
 ```c
 // shared precomputation (K = tan(π·fc/fs))
@@ -174,6 +193,9 @@ float norm = K2 + M_SQRT2 * K + 1.0f;   // Butterworth Q = 1/√2
 // AP:   selected Q is used to calculate the denominator; num = {a2, a1, 1},
 //       den = {1, a1, a2} (mirror of the denominator) — exact w0/alpha formula
 //       in CONTRACTS.md §3
+// PK:   peaking EQ (not Butterworth) — bilinear transform of an analog bell
+//       prototype with A = 10^(gain_dB/40), pre-warped like LP/HP/BP;
+//       exact formula in CONTRACTS.md §3
 
 // Q14 quantization:
 int32_t q14(float x) { return (int32_t)roundf(x * 16384.0f); }

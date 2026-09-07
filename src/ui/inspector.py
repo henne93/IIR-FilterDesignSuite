@@ -188,6 +188,10 @@ class BlockInspectorPanel(QWidget):
         elif kind == "AP":
             self._fields["fc"] = self._add_field(form, "fc (Hz)", "fc", block.params["fc"])
             self._fields["Q"] = self._add_field(form, "Q", "Q", block.params["Q"])
+        elif kind == "PK":
+            self._fields["fc"] = self._add_field(form, "fc (Hz)", "fc", block.params["fc"])
+            self._fields["Q"] = self._add_field(form, "Q", "Q", block.params["Q"])
+            self._fields["gain_db"] = self._add_field(form, "Gain (dB)", "gain_db", block.params["gain_db"])
 
     def _add_field(self, form: QFormLayout, label: str, key: str, value: float) -> QLineEdit:
         edit = QLineEdit(f"{value:g}")
@@ -479,6 +483,16 @@ class Inspector(QWidget):
                         q = block.params["Q"]
                         self._sweep_cache[block.id] = coefficient_sweep(
                             self.chain.fs, lambda x, f=filt, q=q: type(f)(fs=self.chain.fs, fc=x, Q=q), self.backend
+                        )
+                    elif block.kind == "PK":
+                        q = block.params["Q"]
+                        gain_db = block.params["gain_db"]
+                        self._sweep_cache[block.id] = coefficient_sweep(
+                            self.chain.fs,
+                            lambda x, f=filt, q=q, gain_db=gain_db: type(f)(
+                                fs=self.chain.fs, fc=x, Q=q, gain_db=gain_db
+                            ),
+                            self.backend,
                         )
                     elif block.kind == "BP":
                         self._sweep_cache[block.id] = coefficient_sweep(

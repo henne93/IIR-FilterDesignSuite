@@ -17,6 +17,7 @@ import pytest
 from error_analysis import COEFFICIENT_SWEEP_N
 from export import (
     C_SRC_DIR,
+    FILTER_KIND_NAMES,
     ExportError,
     _sweep_design_at,
     build_snapshot,
@@ -357,14 +358,26 @@ def test_bp_sweep_results_appear_in_pdf(tmp_path, native_backend, monkeypatch):
 
 
 def test_all_block_kinds_have_sweep_defined(native_backend):
-    """LP/HP/AP (pre-existing) and BP (this fix) all get a coefficient sweep."""
+    """LP/HP/AP (pre-existing), BP (this fix), and PK all get a coefficient sweep."""
     chain = _chain_lp_hp_bp_ap()
+    chain.add_block("PK", fc=2500.0, Q=1.0, gain_db=6.0)
     snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
 
-    assert {b.kind for b in snapshot.blocks} == {"LP", "HP", "BP", "AP"}
+    assert {b.kind for b in snapshot.blocks} == {"LP", "HP", "BP", "AP", "PK"}
     for block in snapshot.blocks:
         assert block.coefficient_sweep is not None
         assert block.sweep_unavailable_reason is None
+
+
+def test_peak_block_description_and_kind_name(native_backend):
+    chain = FilterChain(fs=FS)
+    chain.add_block("PK", fc=2500.0, Q=1.0, gain_db=6.0)
+    snapshot = build_snapshot(chain, native_backend, now=FIXED_NOW)
+
+    assert FILTER_KIND_NAMES["PK"] == "Peaking EQ"
+    header_text = render_header(snapshot)
+    assert "Peaking EQ" in header_text
+    assert "fc = 2500 Hz  Q = 1  Gain = +6 dB" in header_text
 
 
 # --- invalid-chain rejection -------------------------------------------------------

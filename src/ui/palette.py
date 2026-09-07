@@ -21,6 +21,7 @@ PALETTE_KINDS: tuple[tuple[BlockKind, str], ...] = (
     ("HP", "High-Pass"),
     ("BP", "Band-Pass"),
     ("AP", "All-Pass"),
+    ("PK", "Peak"),
 )
 
 

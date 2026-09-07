@@ -98,7 +98,9 @@ class CoefficientSweepError:
 def _require_backend(backend: NativeBackend | None) -> None:
     if backend is None:
         raise ValueError("a NativeBackend is required for Q14 comparisons (none was provided)")
-    missing = [m for m in ("design_lp", "design_hp", "design_bp", "design_ap") if not hasattr(backend, m)]
+    missing = [
+        m for m in ("design_lp", "design_hp", "design_bp", "design_ap", "design_pk") if not hasattr(backend, m)
+    ]
     if missing:
         raise ValueError(f"backend is missing required NativeBackend method(s): {', '.join(missing)}")
 

@@ -23,7 +23,7 @@ FS = 13333.0
 
 def test_default_params_valid_for_every_supported_fs(fs):
     chain = FilterChain(fs=fs)
-    for kind in ("LP", "HP", "BP", "AP"):
+    for kind in ("LP", "HP", "BP", "AP", "PK"):
         bid = chain.add_block(kind)
         block = chain.get_block(bid)
         assert block.is_valid, block.error

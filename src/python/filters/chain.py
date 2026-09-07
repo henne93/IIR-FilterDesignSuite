@@ -47,14 +47,16 @@ from .bandpass import BandPassFilter
 from .base import FS_MAX_HZ, FS_MIN_HZ, FilterDesign, FrequencyResponse, NativeBackend
 from .highpass import HighPassFilter
 from .lowpass import LowPassFilter
+from .peak import PeakFilter
 
-BlockKind = Literal["LP", "HP", "BP", "AP"]
+BlockKind = Literal["LP", "HP", "BP", "AP", "PK"]
 
 _KIND_TO_CLASS: dict[BlockKind, type[FilterDesign]] = {
     "LP": LowPassFilter,
     "HP": HighPassFilter,
     "BP": BandPassFilter,
     "AP": AllPassFilter,
+    "PK": PeakFilter,
 }
 
 # Defaults for a freshly-added block. Chosen well inside every parameter's
@@ -62,12 +64,17 @@ _KIND_TO_CLASS: dict[BlockKind, type[FilterDesign]] = {
 # fc_max(fs) across the supported [5_000, 40_000] Hz domain is
 # fc_max(5_000) = 2_250 Hz, so a 1_000/2_000 Hz default is always valid
 # regardless of the chain's current fs. AP's Q = 1/sqrt(2) is the
-# Butterworth-flat default, comfortably inside [0.25, 4.0].
+# Butterworth-flat default, comfortably inside [0.25, 4.0]. PK's own Q range
+# is [0.8, 4.0] (narrower than AP's -- see filters/peak.py's module
+# docstring for why low Q + high gain can exceed int16 Q14 headroom), so its
+# default Q=1.0 is used instead of 1/sqrt(2); default gain is +6 dB (inside
+# [-15, 15]).
 DEFAULT_PARAMS: dict[BlockKind, dict[str, float]] = {
     "LP": {"fc": 1_000.0},
     "HP": {"fc": 1_000.0},
     "BP": {"f_low": 1_000.0, "f_high": 2_000.0},
     "AP": {"fc": 1_000.0, "Q": 1.0 / 2.0**0.5},
+    "PK": {"fc": 1_000.0, "Q": 1.0, "gain_db": 6.0},
 }
 
 

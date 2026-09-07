@@ -30,6 +30,16 @@ Calibration method and findings (see PR/task report for the full numbers):
       max observed ~0.25 dB (HP) -> locked at 0.5 dB.
     - "full range" (including the extreme edges): max observed ~3.65 dB
       (HP, fc=220 Hz at fs=40000 Hz) -> locked at 5.0 dB.
+
+- PK (peaking EQ) shares the interior tolerance (measured ~0.02 dB, far
+  inside the 0.5 dB LP/HP/BP/AP bound) but needs its own, looser full-range
+  tolerance: PK's extra Q/gain dimensions compound with the same low-fc/
+  high-fs edge sensitivity above, and its true domain-corner worst case
+  (fc=100 Hz, fs=40000 Hz, Q=4.0, gain_db=-15 -- i.e. the deepest, narrowest
+  cut at the lowest edge) measures ~8.66 dB -- confirmed the actual maximum
+  by a finer grid search around that corner, not just the coarse sweep grid
+  below. Locked at 12.0 dB (~1.4x measured margin, same ratio as LP/HP/BP/AP's
+  own full-range calibration above).
 """
 
 from __future__ import annotations
@@ -43,6 +53,7 @@ from filters.bandpass import BandPassFilter
 from filters.base import fc_max
 from filters.highpass import HighPassFilter
 from filters.lowpass import LowPassFilter
+from filters.peak import PeakFilter
 
 FS_SWEEP = [5_000.0, 8_000.0, 13_333.0, 22_050.0, 40_000.0]
 
@@ -50,6 +61,7 @@ FS_SWEEP = [5_000.0, 8_000.0, 13_333.0, 22_050.0, 40_000.0]
 COEFFICIENT_ERROR_TOL = 1e-4
 RESPONSE_ERROR_INTERIOR_DB = 0.5
 RESPONSE_ERROR_FULL_RANGE_DB = 5.0
+RESPONSE_ERROR_FULL_RANGE_DB_PK = 12.0  # PK's own, looser full-range tolerance -- see module docstring
 RESPONSE_MAGNITUDE_FLOOR_DB = -20.0  # gate: only compare where ideal |H| > this
 EDGE_FRACTION = 0.05  # "interior" excludes this fraction of the range at each end
 
@@ -98,6 +110,42 @@ def test_coefficient_sweep_lp_hp_ap(native_backend, name, cls, extra):
             q14_float = f.q14_coefficients(native_backend).to_float()
             max_err = max(max_err, max(_coeff_errors(ideal, q14_float)))
     assert max_err < COEFFICIENT_ERROR_TOL, f"{name}: max coefficient error {max_err:.3e}"
+
+
+PK_Q_CASES = [0.8, 1.5, 4.0]
+PK_GAIN_CASES = [-15.0, 0.0, 6.0, 15.0]
+
+
+def test_coefficient_sweep_pk(native_backend):
+    max_err = 0.0
+    for fs in FS_SWEEP:
+        hi = fc_max(fs)
+        for fc in np.linspace(100.0, hi, COEFFICIENT_SWEEP_N // 50):
+            for q in PK_Q_CASES:
+                for gain_db in PK_GAIN_CASES:
+                    f = PeakFilter(fs=fs, fc=fc, Q=q, gain_db=gain_db)
+                    ideal = f.ideal_coefficients()
+                    q14_float = f.q14_coefficients(native_backend).to_float()
+                    max_err = max(max_err, max(_coeff_errors(ideal, q14_float)))
+    assert max_err < COEFFICIENT_ERROR_TOL, f"PK: max coefficient error {max_err:.3e}"
+
+
+def test_response_error_pk(native_backend):
+    max_err = 0.0
+    for fs in FS_SWEEP:
+        hi = fc_max(fs)
+        grid = _bode_grid(fs)
+        for fc in np.linspace(100.0, hi, RESPONSE_SWEEP_N // 4):
+            for q in PK_Q_CASES:
+                for gain_db in PK_GAIN_CASES:
+                    f = PeakFilter(fs=fs, fc=fc, Q=q, gain_db=gain_db)
+                    ideal = f.ideal_coefficients()
+                    q14_float = f.q14_coefficients(native_backend).to_float()
+                    mag_i, err = _response_error_db(ideal, q14_float, fs, grid)
+                    mask = mag_i > RESPONSE_MAGNITUDE_FLOOR_DB
+                    if mask.any():
+                        max_err = max(max_err, err[mask].max())
+    assert max_err < RESPONSE_ERROR_FULL_RANGE_DB_PK, f"PK: max response error {max_err:.3f} dB"
 
 
 def test_coefficient_sweep_bp(native_backend):
@@ -154,15 +202,23 @@ def test_response_error_full_range_lp_hp_ap(native_backend, name, cls, extra):
 # Locked int16 headroom regression bound (CONTRACTS.md §7): a full-domain
 # sweep (this test) measures a true worst case of ~32712 Q14 counts (AP
 # a1/b1, near Q=4.0, fc near 100 Hz) -- comfortably under INT16_MAX (32767)
-# but tight. This bound catches any future formula/range change that erodes
-# that headroom before it becomes a silent int16 saturation in the field.
+# but tight. PK's own worst case (b1/a1, near fc=100 Hz, Q=4.0, gain_db=+/-15)
+# is ~32737 counts -- tighter than AP's but still under this bound. PK's
+# Q_MIN is 0.8, not 0.25 like AP: at lower Q combined with +/-15 dB gain, PK's
+# b0/b2 are NOT bounded by ~2.0 the way every other filter type's coefficients
+# are (e.g. Q=0.25 at gain_db=+15 pushes b0 to ~3.11, real saturation, not
+# quantization noise) -- see filters/peak.py's module docstring. This bound
+# catches any future formula/range change that erodes that headroom before it
+# becomes a silent int16 saturation in the field.
 INT16_HEADROOM_BOUND = 32750
 AP_Q_SWEEP = np.linspace(0.25, 4.0, 12)
+PK_Q_SWEEP = np.linspace(0.8, 4.0, 8)
+PK_GAIN_SWEEP = np.linspace(-15.0, 15.0, 5)
 
 
 def test_no_coefficient_saturates_int16_across_domain(native_backend):
     """Regression guard for the int16_t q14_coeffs_t storage width
-    (CONTRACTS.md §7): no in-domain LP/HP/BP/AP design's quantized
+    (CONTRACTS.md §7): no in-domain LP/HP/BP/AP/PK design's quantized
     coefficient may approach INT16_MAX/INT16_MIN (32767/-32768)."""
     max_abs = 0
 
@@ -178,6 +234,9 @@ def test_no_coefficient_saturates_int16_across_domain(native_backend):
             track(HighPassFilter(fs=fs, fc=fc).q14_coefficients(native_backend))
             for q in AP_Q_SWEEP:
                 track(AllPassFilter(fs=fs, fc=fc, Q=q).q14_coefficients(native_backend))
+            for q in PK_Q_SWEEP:
+                for gain_db in PK_GAIN_SWEEP:
+                    track(PeakFilter(fs=fs, fc=fc, Q=q, gain_db=gain_db).q14_coefficients(native_backend))
         for f_low in np.linspace(100.0, hi * 0.9, 20):
             for f_high in np.linspace(f_low + 10.0, hi, 5):
                 if f_high <= f_low:

@@ -59,7 +59,7 @@ class FrequencyResponse:
     phase_deg: np.ndarray      # (N,) float64, unwrapped
 
 class FilterDesign(ABC):
-    kind: ClassVar[Literal["LP", "HP", "BP", "AP"]]
+    kind: ClassVar[Literal["LP", "HP", "BP", "AP", "PK"]]
 
     def __init__(self, fs: float, **params: float) -> None: ...
 
@@ -78,8 +78,8 @@ class FilterDesign(ABC):
         """e.g. BP -> {'fc': ..., 'Q': ...}. Empty dict for LP/HP. AP -> {} (Q is a primary param)."""
 ```
 
-Concrete subclasses: `LowPassFilter`, `HighPassFilter`, `BandPassFilter`, `AllPassFilter`
-in `lowpass.py` / `highpass.py` / `bandpass.py` / `allpass.py`, each implementing
+Concrete subclasses: `LowPassFilter`, `HighPassFilter`, `BandPassFilter`, `AllPassFilter`,
+`PeakFilter` in `lowpass.py` / `highpass.py` / `bandpass.py` / `allpass.py` / `peak.py`, each implementing
 `ideal_coefficients()` per the closed-form equations in §3, and `q14_coefficients()` by
 calling the matching native function (§8) through a shared `NativeBackend` handle
 (injected, not a module-level singleton — keeps the filter classes testable without a
@@ -179,10 +179,38 @@ crosses `−180°` exactly at `fc`, verified numerically to floating-point preci
 No prewarping is needed here (unlike BP) because the defining properties (unity
 magnitude, `-180°` at `fc`) hold for the un-prewarped digital `w0` directly.
 
-**Verification method:** all four formulas above were checked with a standalone
+### Peak (peaking EQ) — new filter type, not part of the original CONCEPT.md scope
+Not a Butterworth design (unlike LP/HP/BP/AP) — a parametric bell boost/cut, derived from
+the analog peaking-EQ prototype `H(s) = (s² + (A/Q)s + 1) / (s² + s/(A·Q) + 1)`,
+`A = 10^(gain_dB/40)`, normalized to Ω₀=1. Bilinear-transformed via
+`s = (1/K)·(1−z⁻¹)/(1+z⁻¹)`, `K = tan(π·fc/fs)` — the same prewarping LP/HP/BP use to
+place the prototype's normalized critical frequency (Ω=1) exactly at the digital `fc`
+(unlike All-Pass's un-prewarped `w0`):
+```
+K    = tan(π·fc/fs)
+A    = 10^(gain_dB/40)
+norm = K² + K/(A·Q) + 1
+b0   = (K² + (A/Q)·K + 1) / norm
+b1   = 2·(K² − 1) / norm
+b2   = (K² − (A/Q)·K + 1) / norm
+a1   = b1
+a2   = (K² − K/(A·Q) + 1) / norm
+```
+`a1` and `b1` are identical by construction: the bilinear-transformed numerator and
+denominator share the same `z⁻¹` coefficient (`2·(K²−1)`) before normalization by `norm` —
+only the `z⁰`/`z⁻²` terms differ (they carry `±(A/Q)·K` vs. `±K/(A·Q)`).
+Property: `|H(e^{j2π·fc/fs})|` = exactly `gain_dB` dB (pre-warping preserves the critical
+point exactly, same reasoning as LP/HP's exact `-3.0103 dB` edge). `|H(DC)| = |H(Nyquist)|`
+= exactly 0 dB (the prototype's `s→0`/`s→∞` boundary conditions both reduce to `H=1`,
+independent of `Q` or `gain_dB`). At `gain_dB=0` (`A=1`), `b0=1` and `b1=a1`, `b2=a2`,
+so `H(z)≡1` identically — a useful identity check.
+
+**Verification method:** all four Butterworth formulas above were checked with a standalone
 complex-arithmetic evaluation of `H(e^{jω})` (not scipy) at the claimed critical
 frequencies, confirming `−3.0103 dB` (i.e. exact `−3 dB`) at every claimed edge and
-exact `±0°`/`−180°` phase properties. Anyone re-implementing this in C should hold the
+exact `±0°`/`−180°` phase properties. Peak's exact-`gain_dB`-at-`fc` and exact-0dB-at-DC/
+Nyquist properties were verified the same way (direct complex-arithmetic evaluation, not
+scipy) — see `tests/test_peak.py`. Anyone re-implementing this in C should hold the
 Python reference to the same numeric check as a unit test (see §14).
 
 ---
@@ -227,6 +255,24 @@ accuracy sweep (§11) into measuring "which design algorithm did we pick" instea
 | `fc` (LP, HP, AP) | `100 Hz ≤ fc ≤ fc_max(fs)` | See "Effective digital cutoff maximum" below. **Deviation from CONCEPT.md §6**, which describes the sweep range as "10 Hz to `0.45·fs`" — see Summary of deviations, item 6. |
 | `f_low`, `f_high` (BP) | each independently in `[100, fc_max(fs)]`, and `f_low < f_high` strictly | Both edges are bounded by the same effective range as `fc` above. `fc`/`Q` are derived and always land in-range automatically given that constraint. |
 | `Q` (AP) | `0.25 ≤ Q ≤ 4.0` | Per CONCEPT.md. |
+| `fc` (PK) | `100 Hz ≤ fc ≤ fc_max(fs)` | Same effective range as LP/HP/AP. |
+| `Q` (PK) | `0.8 ≤ Q ≤ 4.0` | **Narrower than AP's `[0.25, 4.0]`** -- deliberate, see note below. Default `1.0`. |
+| `gain` (PK) | `-15.0 dB ≤ gain ≤ 15.0 dB` | Product decision; default `+6.0 dB`. |
+
+**Why PK's `Q` floor is 0.8, not AP's 0.25:** unlike LP/HP/BP/AP, whose coefficients are
+provably bounded within ~2.0 in magnitude across their entire supported domain (§7), PK's
+peaking-EQ coefficients are **not** bounded that way at low `Q` combined with high
+`|gain|` -- e.g. `Q=0.25` at `gain=+15 dB` pushes `b0` up to ~3.11, which is real int16 Q14
+saturation, not the ordinary quantization noise every other filter type exhibits. This was
+discovered empirically while implementing PK (a domain sweep found `max_abs=32768`, i.e.
+actual clamping, before this floor was raised) and resolved by raising `Q_MIN` to `0.8`,
+which keeps the full `[-15, 15]` dB gain range while bringing the worst-case in-domain
+coefficient back to `~1.998` (`|b1|`/`|a1|`, near `fc=100 Hz`, `Q=4.0`, `gain=±15 dB`) --
+the same tight-but-non-saturating margin class as AP's own worst case. This is a
+**deliberate, user-confirmed trade-off** (narrower low-Q range in exchange for keeping the
+full gain range), not an oversight to "fix" by reverting to `0.25` -- see
+`tests/test_native_coefficients.py::test_no_coefficient_saturates_int16_across_domain`,
+which is the regression guard for this.
 
 **Effective digital cutoff maximum:**
 ```
@@ -303,10 +349,14 @@ match across the ideal/Q14 comparison or the fixed display grid.
   coefficients can reach magnitude up to 2.0 in the theoretical Q14 format, but a full
   sweep of every LP/HP/BP/AP design across the actual supported parameter domain (§5:
   `fs∈[5000,40000]`, `fc`/`f_low`/`f_high`∈`[100,fc_max(fs)]`, `Q∈[0.25,4]`) gives a true
-  worst-case magnitude of **1.9958** (AP `a1`/`b1`, near `Q=4`, `fc→100`). **Storage/ABI
-  type is `int16_t`** for every coefficient — this fits inside int16 Q14 (max
-  representable ≈1.99994) with only ~0.004 headroom, tight but real, and locked by an
-  automated domain-sweep regression test (`tests/test_native_coefficients.py::test_no_coefficient_saturates_int16_across_domain`).
+  worst-case magnitude of **1.9958** (AP `a1`/`b1`, near `Q=4`, `fc→100`). PK's own domain
+  (`fc`/`fs` as above, `Q∈[0.8,4]` — narrower than AP's, see §5) gives a worst case of
+  **~1.998** (`b1`/`a1`, near `fc→100`, `Q=4`, `gain=±15 dB`) — PK's coefficients are *not*
+  bounded by ~2.0 the way LP/HP/BP/AP's are at lower `Q`, which is exactly why its `Q`
+  floor is raised (§5). **Storage/ABI type is `int16_t`** for every coefficient — this
+  fits inside int16 Q14 (max representable ≈1.99994) with only ~0.002–0.004 headroom
+  depending on filter type, tight but real, and locked by an automated domain-sweep
+  regression test (`tests/test_native_coefficients.py::test_no_coefficient_saturates_int16_across_domain`).
   This is narrower than an earlier int32-storage design (which had large headroom by
   construction) — the narrower width was chosen deliberately to keep the firmware-facing
   `biquad_q14.{h,c}` 16-bit-only end to end (coefficients, samples, and state), matching a
@@ -408,13 +458,14 @@ int filter_design_lp(float fc, float fs, q14_coeffs_t *out);
 int filter_design_hp(float fc, float fs, q14_coeffs_t *out);
 int filter_design_bp(float f_low, float f_high, float fs, q14_coeffs_t *out);
 int filter_design_ap(float fc, float fs, float q, q14_coeffs_t *out);
+int filter_design_pk(float fc, float fs, float q, float gain_db, q14_coeffs_t *out);
 
 #ifdef __cplusplus
 }
 #endif
 ```
 Error codes: `0` success, `-1` frequency out of `(0, fs/2)`, `-2` `fs <= 0`,
-`-3` `f_low >= f_high` (BP only), `-4` `q` out of `(0, ∞)` (AP only).
+`-3` `f_low >= f_high` (BP only), `-4` `q` out of `(0, ∞)` (AP, PK).
 
 ctypes wrapper (`c_codegen.py`):
 ```python
@@ -427,6 +478,7 @@ lib.filter_design_lp.restype  = ctypes.c_int
 # filter_design_hp: same signature as lp
 # filter_design_bp.argtypes = [c_float, c_float, c_float, POINTER(Q14Coeffs)]  # f_low, f_high, fs
 # filter_design_ap.argtypes = [c_float, c_float, c_float, POINTER(Q14Coeffs)]  # fc, fs, q
+# filter_design_pk.argtypes = [c_float, c_float, c_float, c_float, POINTER(Q14Coeffs)]  # fc, fs, q, gain_db
 
 # biquad_q14_process (src/c/biquad_q14.h) is 16-bit-only end to end:
 # lib.biquad_q14_process.argtypes = [ctypes.POINTER(BiquadState), ctypes.c_int16]

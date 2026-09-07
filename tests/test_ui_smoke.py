@@ -91,7 +91,7 @@ def test_no_validate_action_exists(window):
 # --- adding filter types ------------------------------------------------------
 
 
-@pytest.mark.parametrize("kind", ["LP", "HP", "BP", "AP"])
+@pytest.mark.parametrize("kind", ["LP", "HP", "BP", "AP", "PK"])
 def test_adding_each_filter_type(canvas, kind):
     block_id = canvas.add_block(kind)
     assert canvas.chain.get_block(block_id).kind == kind

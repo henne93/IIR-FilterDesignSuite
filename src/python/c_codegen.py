@@ -21,7 +21,7 @@ C_SRC_DIR = Path(__file__).resolve().parent.parent / "c"
 C_SOURCES = ["filter_design.c", "biquad_q14.c"]
 
 # CONTRACTS.md §8: 0 success, -1 frequency out of (0, fs/2), -2 fs <= 0,
-# -3 f_low >= f_high (BP only), -4 q out of (0, inf) (AP only).
+# -3 f_low >= f_high (BP only), -4 q out of (0, inf) (AP, PK).
 _ERROR_MESSAGES = {
     -1: "frequency out of (0, fs/2)",
     -2: "fs <= 0",
@@ -150,6 +150,8 @@ def _configure_argtypes(lib: ctypes.CDLL) -> None:
     lib.filter_design_bp.restype = ctypes.c_int
     lib.filter_design_ap.argtypes = [c_float, c_float, c_float, p_coeffs]
     lib.filter_design_ap.restype = ctypes.c_int
+    lib.filter_design_pk.argtypes = [c_float, c_float, c_float, c_float, p_coeffs]
+    lib.filter_design_pk.restype = ctypes.c_int
 
     lib.biquad_q14_init.argtypes = [ctypes.POINTER(BiquadState), p_coeffs]
     lib.biquad_q14_init.restype = None
@@ -219,6 +221,12 @@ class NativeBackend:
         out = Q14Coeffs()
         rc = self._lib.filter_design_ap(fc, fs, q, ctypes.byref(out))
         _raise_for_rc(rc, "filter_design_ap")
+        return Q14Coefficients(out.b0, out.b1, out.b2, out.a1, out.a2)
+
+    def design_pk(self, fc: float, fs: float, q: float, gain_db: float) -> Q14Coefficients:
+        out = Q14Coeffs()
+        rc = self._lib.filter_design_pk(fc, fs, q, gain_db, ctypes.byref(out))
+        _raise_for_rc(rc, "filter_design_pk")
         return Q14Coefficients(out.b0, out.b1, out.b2, out.a1, out.a2)
 
     def process_samples(self, coeffs: Q14Coefficients, samples: Sequence[int]) -> list[int]:

@@ -17,7 +17,7 @@ from filters import ChainBlock
 
 MIME_BLOCK_ID = "application/x-iir-block-id"
 
-_KIND_NAMES = {"LP": "Low-Pass", "HP": "High-Pass", "BP": "Band-Pass", "AP": "All-Pass"}
+_KIND_NAMES = {"LP": "Low-Pass", "HP": "High-Pass", "BP": "Band-Pass", "AP": "All-Pass", "PK": "Peak"}
 
 # Inline action-control sizing (module docstring: buttons live *in* the
 # block's own header row -- fixed height as well as width so a QToolButton's

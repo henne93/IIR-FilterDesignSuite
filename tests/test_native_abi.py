@@ -99,6 +99,11 @@ def test_design_functions_return_zero_on_success(native_backend):
     assert isinstance(coeffs.b0, int)
 
 
+def test_design_pk_returns_zero_on_success(native_backend):
+    coeffs = native_backend.design_pk(3000.0, 13333.0, 1.0, 6.0)
+    assert isinstance(coeffs.b0, int)
+
+
 @pytest.mark.parametrize(
     ("call", "expected_rc"),
     [
@@ -108,6 +113,9 @@ def test_design_functions_return_zero_on_success(native_backend):
         (lambda b: b.design_bp(4000.0, 2000.0, 13333.0), -3),  # f_low >= f_high
         (lambda b: b.design_ap(3000.0, 13333.0, -1.0), -4),  # q out of (0, inf)
         (lambda b: b.design_ap(3000.0, 13333.0, 0.0), -4),
+        (lambda b: b.design_pk(3000.0, 13333.0, -1.0, 6.0), -4),  # q out of (0, inf)
+        (lambda b: b.design_pk(3000.0, 13333.0, 0.0, 6.0), -4),
+        (lambda b: b.design_pk(-100.0, 13333.0, 1.0, 6.0), -1),  # freq out of (0, fs/2)
     ],
 )
 def test_invalid_input_raises_native_call_error_with_correct_code(native_backend, call, expected_rc):

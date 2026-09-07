@@ -16,6 +16,7 @@ def test_round_trip_preserves_fs_and_all_block_kinds(tmp_path):
     chain.add_block("HP", fc=500.0)
     bp_id = chain.add_block("BP", f_low=1_000.0, f_high=2_000.0)
     chain.add_block("AP", fc=1_500.0, Q=1.2)
+    chain.add_block("PK", fc=2_500.0, Q=1.0, gain_db=6.0)
     chain.set_enabled(bp_id, False)
 
     path = tmp_path / "chain.iirfilt"
@@ -23,11 +24,12 @@ def test_round_trip_preserves_fs_and_all_block_kinds(tmp_path):
     fs, blocks = load_project(path)
 
     assert fs == 22_050.0
-    assert [b["kind"] for b in blocks] == ["LP", "HP", "BP", "AP"]
+    assert [b["kind"] for b in blocks] == ["LP", "HP", "BP", "AP", "PK"]
     assert blocks[0]["params"] == {"fc": 3_000.0}
     assert blocks[2]["params"] == {"f_low": 1_000.0, "f_high": 2_000.0}
     assert blocks[3]["params"] == {"fc": 1_500.0, "Q": 1.2}
-    assert [b["enabled"] for b in blocks] == [True, True, False, True]
+    assert blocks[4]["params"] == {"fc": 2_500.0, "Q": 1.0, "gain_db": 6.0}
+    assert [b["enabled"] for b in blocks] == [True, True, False, True, True]
 
 
 def test_round_trip_preserves_invalid_block(tmp_path):

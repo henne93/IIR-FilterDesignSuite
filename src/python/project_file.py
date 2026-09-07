@@ -19,7 +19,7 @@ from filters.chain import FilterChain
 SCHEMA_VERSION = 1
 PROJECT_FILE_EXTENSION = ".iirfilt"
 
-_VALID_KINDS = {"LP", "HP", "BP", "AP"}
+_VALID_KINDS = {"LP", "HP", "BP", "AP", "PK"}
 
 
 class ProjectFileError(RuntimeError):

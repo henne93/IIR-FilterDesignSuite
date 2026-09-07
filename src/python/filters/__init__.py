@@ -11,6 +11,7 @@ from .base import (
 from .chain import BlockKind, ChainBlock, DEFAULT_PARAMS, FilterChain
 from .highpass import HighPassFilter
 from .lowpass import LowPassFilter
+from .peak import PeakFilter
 
 __all__ = [
     "Coefficients",
@@ -23,6 +24,7 @@ __all__ = [
     "HighPassFilter",
     "BandPassFilter",
     "AllPassFilter",
+    "PeakFilter",
     "BlockKind",
     "ChainBlock",
     "DEFAULT_PARAMS",

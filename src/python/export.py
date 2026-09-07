@@ -116,6 +116,7 @@ FILTER_KIND_NAMES: Mapping[BlockKind, str] = MappingProxyType(
         "HP": "Butterworth High-Pass",
         "BP": "Butterworth Band-Pass",
         "AP": "Butterworth All-Pass",
+        "PK": "Peaking EQ",
     }
 )
 
@@ -189,6 +190,10 @@ def _sweep_design_at(block: ChainBlock, fs: float) -> Callable[[float], FilterDe
     if block.kind == "AP":
         q = block.params["Q"]
         return lambda x, f=filt, q=q: type(f)(fs=fs, fc=x, Q=q)
+    if block.kind == "PK":
+        q = block.params["Q"]
+        gain_db = block.params["gain_db"]
+        return lambda x, f=filt, q=q, gain_db=gain_db: type(f)(fs=fs, fc=x, Q=q, gain_db=gain_db)
     if block.kind == "BP":
         hi = fc_max(fs)
         half_bw = (block.params["f_high"] - block.params["f_low"]) / 2.0
@@ -281,6 +286,8 @@ def _filter_description(block: BlockSnapshot) -> str:
         return f"f_low = {block.params['f_low']:g} Hz  f_high = {block.params['f_high']:g} Hz"
     if block.kind == "AP":
         return f"fc = {block.params['fc']:g} Hz  Q = {block.params['Q']:g}"
+    if block.kind == "PK":
+        return f"fc = {block.params['fc']:g} Hz  Q = {block.params['Q']:g}  Gain = {block.params['gain_db']:+g} dB"
     raise ValueError(f"unknown filter kind {block.kind!r}")  # pragma: no cover -- BlockKind is exhaustive above
 
 

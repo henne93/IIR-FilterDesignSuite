@@ -40,6 +40,10 @@ class FakeNativeBackend:
         self.calls.append(("design_ap", (fc, fs, q)))
         return Q14Coefficients(0, 0, 0, 0, 0)
 
+    def design_pk(self, fc: float, fs: float, q: float, gain_db: float) -> Q14Coefficients:
+        self.calls.append(("design_pk", (fc, fs, q, gain_db)))
+        return Q14Coefficients(0, 0, 0, 0, 0)
+
 
 @pytest.fixture
 def fake_backend() -> FakeNativeBackend:
