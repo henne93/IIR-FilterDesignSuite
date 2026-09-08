@@ -708,7 +708,15 @@ def test_firmware_subfolder_contains_expected_files(tmp_path, native_backend):
 
     assert result.firmware_dir == result.output_dir / "firmware"
     names = {p.name for p in result.firmware_dir.iterdir()}
-    assert names == {"filter_design.h", "biquad_q14.h", "biquad_q14.c", "example.c", "README.md"}
+    assert names == {
+        "filter_design.h",
+        "filter_design_calc.h",
+        "filter_design_calc.c",
+        "biquad_q14.h",
+        "biquad_q14.c",
+        "example.c",
+        "README.md",
+    }
 
 
 def test_firmware_biquad_c_is_byte_identical_to_src_c(tmp_path, native_backend):
@@ -719,14 +727,31 @@ def test_firmware_biquad_c_is_byte_identical_to_src_c(tmp_path, native_backend):
     assert (result.firmware_dir / "biquad_q14.c").read_bytes() == (C_SRC_DIR / "biquad_q14.c").read_bytes()
 
 
+def test_firmware_design_calc_header_is_byte_identical_to_src_c(tmp_path, native_backend):
+    """filter_design_calc.h has no #include of its own, so unlike the paired
+    .c file it needs no rewrite -- a pure verbatim copy of src/c/filter_design.h."""
+    result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
+
+    assert (result.firmware_dir / "filter_design_calc.h").read_bytes() == (C_SRC_DIR / "filter_design.h").read_bytes()
+
+
+def test_firmware_design_calc_source_matches_src_c_except_include(tmp_path, native_backend):
+    """filter_design_calc.c is a verbatim copy of src/c/filter_design.c except
+    its own #include line is repointed at the renamed header -- never
+    hand-duplicated design math."""
+    result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
+
+    original = (C_SRC_DIR / "filter_design.c").read_text(encoding="utf-8")
+    bundled = (result.firmware_dir / "filter_design_calc.c").read_text(encoding="utf-8")
+    assert bundled == original.replace('#include "filter_design.h"', '#include "filter_design_calc.h"', 1)
+
+
 def test_firmware_header_has_no_filter_design_include_and_defines_q14_coeffs(tmp_path, native_backend):
     result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
 
     text = (result.firmware_dir / "biquad_q14.h").read_text(encoding="utf-8")
     assert '#include "filter_design.h"' not in text
-    assert "typedef struct" in text
-    assert "q14_coeffs_t;" in text
-    assert "int16_t b0, b1, b2, a1, a2;" in text
+    assert '#include "filter_design_calc.h"' in text
 
 
 def test_firmware_filter_design_h_matches_top_level_content(tmp_path, native_backend):

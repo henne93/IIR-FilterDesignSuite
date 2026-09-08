@@ -18,20 +18,28 @@ Produces a timestamped `export_YYYYMMDD_HHMMSS/` directory containing:
                              at the `[100, fc_max(fs)]` domain edges
                              (CONTRACTS.md §6.3) -- see `_sweep_design_at()`.
 - `firmware/`             -- a complete, self-contained C package (generated
-                             coefficients, `biquad_q14.{h,c}`, a generated
-                             cascade-wiring `example.c`, `README.md`) that a
-                             firmware integrator can copy into another
-                             project as-is (CONTRACTS.md §10). See
-                             `render_firmware_package()` below.
+                             coefficients, `biquad_q14.{h,c}`,
+                             `filter_design_calc.{h,c}` -- the Q14
+                             design-function implementation, renamed to avoid
+                             colliding with the generated coefficient header
+                             below -- a generated cascade-wiring `example.c`,
+                             `README.md`) that a firmware integrator can copy
+                             into another project as-is (CONTRACTS.md §10).
+                             See `render_firmware_package()` below.
 
 The top-level `filter_design.h` above is deliberately coefficient-only, unchanged
 from the original design (CONCEPT.md §7's export file listing enumerates exactly
 the files above it; `biquad_q14.{h,c}` stays firmware reference source in this
 repository's own `src/c/` tree, not duplicated at the top level). The `firmware/`
 subfolder is a separate, additive output that *does* bundle a generated,
-standalone-package variant of `biquad_q14.{h,c}` -- see `render_firmware_package()`,
-`README.md` §6, and `tests/test_firmware_package.py`, which proves that package
-compiles, links, and runs correctly, fully standalone, with GCC.
+standalone-package variant of `biquad_q14.{h,c}` and the Q14 design-function
+implementation (`filter_design_calc.{h,c}`, renamed from `filter_design.{h,c}`
+-- see `render_firmware_package()`, `README.md` §6, and
+`tests/test_firmware_package.py`, which proves that package compiles, links,
+and runs correctly, fully standalone, with GCC, and that its bundled design
+functions produce the same Q14 coefficients as the ctypes `NativeBackend`
+(itself cross-checked against the Python/scipy "ideal" coefficients in
+`tests/test_native_coefficients.py`).
 
 Two-stage design:
 
@@ -59,7 +67,6 @@ invalid disabled block never blocks export.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -352,65 +359,74 @@ def _write_header(path: Path, snapshot: ExportSnapshot) -> None:
 # Additive to the top-level export files above, which stay byte-for-byte
 # unchanged (CONCEPT.md §7's original file listing, CONTRACTS.md §10). This
 # subfolder bundles a complete, self-contained C package -- generated
-# coefficients, the biquad implementation, and a cascade-wiring example --
-# that a firmware integrator can copy into an external project as-is,
-# reversing the original "does not bundle biquad_q14.*" decision for this
-# new, separate output only. Never hand-duplicates biquad_q14.c's DSP logic:
-# it is copied verbatim from src/c/, so Feature-A-style changes to the real
-# implementation propagate to the next export automatically.
+# coefficients, the biquad implementation, the Q14 design-function
+# implementation, and a cascade-wiring example -- that a firmware integrator
+# can copy into an external project as-is, reversing the original "does not
+# bundle biquad_q14.*/filter_design.c" decision for this new, separate output
+# only. Never hand-duplicates the real DSP/design logic: both biquad_q14.c
+# and filter_design.c are copied verbatim from src/c/ (the latter's own
+# `#include` line is repointed, nothing else), so a change to either real
+# implementation propagates to the next export automatically.
+#
+# filter_design.{h,c} (the design-function pair: filter_design_lp/hp/bp/ap/pk())
+# are bundled here under the renamed `filter_design_calc.{h,c}` -- this
+# package already has a *generated coefficient* header also named
+# `filter_design.h` (below), so the real source pair can't keep its own name
+# without colliding. Bundling these lets firmware recompute Q14 coefficients
+# at runtime (e.g. to retune a filter) instead of only ever loading the
+# frozen constants in `filter_design.h`; `tests/test_firmware_package.py`
+# proves the bundled functions produce the same output, standalone, as the
+# ctypes `NativeBackend` used everywhere else in this suite (itself
+# cross-checked against the Python/scipy "ideal" coefficients in
+# `tests/test_native_coefficients.py`).
 
-_Q14_COEFFS_TYPEDEF_RE = re.compile(r"typedef struct \{.*?\}\s*q14_coeffs_t;", re.DOTALL)
-_BIQUAD_INCLUDE_LINE = '#include "filter_design.h"'
-
-
-def _extract_q14_coeffs_typedef(filter_design_h_text: str) -> str:
-    """Pulls the `q14_coeffs_t` typedef out of src/c/filter_design.h's text,
-    so the standalone package header (below) never hand-duplicates that
-    struct -- it's extracted from the real source, not retyped."""
-    match = _Q14_COEFFS_TYPEDEF_RE.search(filter_design_h_text)
-    if match is None:
-        raise ExportError(
-            "could not find the q14_coeffs_t typedef in src/c/filter_design.h -- "
-            "firmware package generation is out of sync with the source (expected a "
-            "'typedef struct { ... } q14_coeffs_t;' block)"
-        )
-    return match.group(0)
+_DESIGN_INCLUDE_LINE = '#include "filter_design.h"'
+_DESIGN_CALC_HEADER_NAME = "filter_design_calc.h"
 
 
 def render_standalone_biquad_header(src_dir: Path = C_SRC_DIR) -> str:
-    """Renders a dependency-free variant of src/c/biquad_q14.h for the
-    firmware package: its `#include "filter_design.h"` line is replaced by a
-    `q14_coeffs_t` typedef extracted from the real src/c/filter_design.h,
-    rather than a second hand-typed copy of that struct. This avoids a real
-    naming collision -- the package also contains a *generated coefficient*
-    header also named `filter_design.h` (see render_firmware_package) -- and
-    means firmware doesn't pull in filter_design_lp/hp/bp/ap() (the
-    host-side, ctypes-only coefficient designer), which it never needs since
-    coefficients are already frozen constants.
+    """Renders a firmware-package variant of src/c/biquad_q14.h: its
+    `#include "filter_design.h"` line is repointed at the bundled, renamed
+    `filter_design_calc.h` (see render_firmware_design_calc_source below)
+    instead of the real src/c/filter_design.h -- avoiding a naming collision
+    with the *generated coefficient* header also named `filter_design.h` in
+    this same package (see render_firmware_package).
     """
     try:
         biquad_h_text = (src_dir / "biquad_q14.h").read_text(encoding="utf-8")
-        filter_design_h_text = (src_dir / "filter_design.h").read_text(encoding="utf-8")
     except OSError as exc:
-        raise ExportError(f"failed to read firmware source under {src_dir}: {exc}") from exc
+        raise ExportError(f"failed to read {src_dir / 'biquad_q14.h'}: {exc}") from exc
 
-    if _BIQUAD_INCLUDE_LINE not in biquad_h_text:
+    if _DESIGN_INCLUDE_LINE not in biquad_h_text:
         raise ExportError(
             f"expected {src_dir / 'biquad_q14.h'} to contain the literal line "
-            f"{_BIQUAD_INCLUDE_LINE!r} -- firmware package generation is out of sync "
+            f"{_DESIGN_INCLUDE_LINE!r} -- firmware package generation is out of sync "
             "with the source"
         )
-    typedef_block = _extract_q14_coeffs_typedef(filter_design_h_text)
+    return biquad_h_text.replace(_DESIGN_INCLUDE_LINE, f'#include "{_DESIGN_CALC_HEADER_NAME}"', 1)
 
-    standalone_block = (
-        "/* Standalone firmware-package variant: q14_coeffs_t is inlined below\n"
-        " * (extracted from src/c/filter_design.h at export time) instead of\n"
-        " * #include-ing that header -- firmware doesn't need\n"
-        " * filter_design_lp/hp/bp/ap() (coefficients are already frozen\n"
-        " * constants), so this file has no dependency beyond <stdint.h>. */\n"
-        f"{typedef_block}"
-    )
-    return biquad_h_text.replace(_BIQUAD_INCLUDE_LINE, standalone_block, 1)
+
+def render_firmware_design_calc_source(src_dir: Path = C_SRC_DIR) -> str:
+    """Renders the firmware-package variant of src/c/filter_design.c: a
+    verbatim copy except its own `#include "filter_design.h"` line is
+    repointed at the bundled, renamed `filter_design_calc.h` -- the same
+    collision `render_standalone_biquad_header` above avoids. The paired
+    header (src/c/filter_design.h) needs no such rewrite: it has no
+    `#include` of its own, so `render_firmware_package` copies it verbatim
+    under the `filter_design_calc.h` name.
+    """
+    try:
+        design_c_text = (src_dir / "filter_design.c").read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ExportError(f"failed to read {src_dir / 'filter_design.c'}: {exc}") from exc
+
+    if _DESIGN_INCLUDE_LINE not in design_c_text:
+        raise ExportError(
+            f"expected {src_dir / 'filter_design.c'} to contain the literal line "
+            f"{_DESIGN_INCLUDE_LINE!r} -- firmware package generation is out of sync "
+            "with the source"
+        )
+    return design_c_text.replace(_DESIGN_INCLUDE_LINE, f'#include "{_DESIGN_CALC_HEADER_NAME}"', 1)
 
 
 def render_firmware_example(snapshot: ExportSnapshot) -> str:
@@ -486,9 +502,14 @@ def render_firmware_readme(snapshot: ExportSnapshot) -> str:
         "- `filter_design.h` -- generated Q14 coefficients for this design\n"
         "  (`FILT<n>_*` defines). Same content as the sibling top-level file.\n"
         "- `biquad_q14.h` / `biquad_q14.c` -- the Direct Form 1 Q14 biquad\n"
-        "  implementation. This header variant inlines its own `q14_coeffs_t`\n"
-        "  definition instead of including a separate type header, so this\n"
-        "  folder has no dependency outside itself.\n"
+        "  implementation.\n"
+        "- `filter_design_calc.h` / `filter_design_calc.c` -- the Q14\n"
+        "  design-function implementation (`filter_design_lp/hp/bp/ap/pk()`),\n"
+        "  renamed from `filter_design.{h,c}` only to avoid colliding with the\n"
+        "  generated coefficient header above; the code is otherwise unchanged.\n"
+        "  Call these to recompute coefficients at runtime (e.g. to retune a\n"
+        "  filter); the frozen constants in `filter_design.h` above are enough\n"
+        "  if your design never changes after flashing.\n"
         "- `example.c` -- generated integration example: `filter_chain_init()`\n"
         "  builds the cascade's state from the coefficients above;\n"
         "  `process_chain(x)` runs one Q14 sample through the full series\n"
@@ -522,6 +543,12 @@ def render_firmware_package(snapshot: ExportSnapshot, output_dir: Path, *, src_d
     except OSError as exc:
         raise ExportError(f"failed to read {src_dir / 'biquad_q14.c'}: {exc}") from exc
     _write_text_lf(firmware_dir / "biquad_q14.c", biquad_c_text, encoding="utf-8")
+    try:
+        design_h_text = (src_dir / "filter_design.h").read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ExportError(f"failed to read {src_dir / 'filter_design.h'}: {exc}") from exc
+    _write_text_lf(firmware_dir / _DESIGN_CALC_HEADER_NAME, design_h_text, encoding="utf-8")
+    _write_text_lf(firmware_dir / "filter_design_calc.c", render_firmware_design_calc_source(src_dir), encoding="utf-8")
     _write_text_lf(firmware_dir / "example.c", render_firmware_example(snapshot), encoding="utf-8")
     _write_text_lf(firmware_dir / "README.md", render_firmware_readme(snapshot), encoding="utf-8")
 

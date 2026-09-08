@@ -574,12 +574,14 @@ ctypes `process_impulse()` path used elsewhere in this suite.
 (added after the original "does not bundle" decision above, which stands for
 the top-level files only). It contains: the same coefficient header (also
 named `filter_design.h`, generated fresh, byte-identical to the top-level
-one); a standalone `biquad_q14.h` variant whose `q14_coeffs_t` is inlined
-(extracted at export time from `src/c/filter_design.h`, never hand-typed a
-second time) instead of `#include`-ing a separate header -- avoiding a real
-naming collision with the coefficient header sitting right next to it, and
-avoiding pulling in the host-side `filter_design_lp/hp/bp/ap()` design
-functions that firmware never needs; a byte-for-byte verbatim copy of
+one); the Q14 design-function implementation itself
+(`filter_design_lp/hp/bp/ap/pk()`), copied verbatim from `src/c/filter_design.{h,c}`
+but renamed to `filter_design_calc.{h,c}` -- the rename is the only change,
+forced by the naming collision with the generated coefficient header sitting
+right next to it, which keeps the `filter_design.h` name; a `biquad_q14.h`
+variant whose `#include "filter_design.h"` line is repointed at the bundled
+`filter_design_calc.h` (same collision, same fix) instead of pulling in the
+generated coefficient header; a byte-for-byte verbatim copy of
 `src/c/biquad_q14.c` (never hand-duplicated, so Feature-A-style changes to
 the real implementation propagate to the next export automatically); a
 generated `example.c` wiring up the *specific* chain being exported (one
@@ -587,13 +589,24 @@ generated `example.c` wiring up the *specific* chain being exported (one
 `process_chain()` function, matching §12's series-only topology); and a
 `README.md` with integration instructions. `render_firmware_package()`
 (`export.py`) produces all of this from the same `ExportSnapshot` used
-elsewhere, with no new data model. This is proven fully self-contained --
-not just asserted -- by `tests/test_firmware_package.py`, which copies the
-generated `firmware/` folder to a location with no relationship to this
-repository, compiles it there with `-I` pointed only at that copy (no
-reference to `src/c/` at all), runs the binary, and cross-checks its output
-bit-exactly against the ctypes `NativeBackend.process_samples()` path used
-elsewhere in this suite. See README.md §6.
+elsewhere, with no new data model. Bundling the design functions (reversing
+an earlier, narrower decision that firmware never needs them since
+coefficients are "already frozen constants") lets a firmware integrator
+recompute Q14 coefficients at runtime -- e.g. to retune a filter -- instead
+of only ever loading the frozen defines in `filter_design.h`. This is proven
+fully self-contained -- not just asserted -- by `tests/test_firmware_package.py`,
+which copies the generated `firmware/` folder to a location with no
+relationship to this repository, compiles it there with `-I` pointed only at
+that copy (no reference to `src/c/` at all), runs the binary, and
+cross-checks its output bit-exactly against the ctypes
+`NativeBackend.process_samples()` path used elsewhere in this suite; a
+further test in that file compiles a small harness calling
+`filter_design_lp/hp/bp/ap/pk()` directly from the detached
+`filter_design_calc.{h,c}` pair and cross-checks the resulting Q14
+coefficients bit-exactly against `NativeBackend.design_lp/hp/bp/ap/pk()` --
+which is itself the same source, compiled unrenamed, and validated against
+the Python/scipy "ideal" coefficients across the full parameter domain by
+`tests/test_native_coefficients.py` (§4/§6/§11). See README.md §6.
 
 ---
 
@@ -821,3 +834,10 @@ Added after v1's initial "no persistence" decision (§13) was reversed.
 12. **Peak (PK), a fifth, non-Butterworth filter type, added** — parametric bell
     boost/cut; see §3, §5, §7 for its formula and the tighter `Q` range this
     required.
+13. **Export's `firmware/` subfolder now also bundles the Q14 design-function
+    implementation itself, as `filter_design_calc.{h,c}`** — reversing, for this
+    subfolder only, the earlier "firmware doesn't need filter_design_lp/hp/bp/ap()"
+    stance (§10); renamed from `filter_design.{h,c}` solely to avoid colliding with
+    the generated coefficient header of the same original name already in the
+    package. Lets firmware recompute coefficients at runtime instead of only ever
+    loading the frozen `filter_design.h` defines.

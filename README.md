@@ -66,9 +66,10 @@ QT_QPA_PLATFORM=offscreen pytest -q
 
 **File ▸ Export** writes a timestamped `export_YYYYMMDD_HHMMSS/` folder
 containing a PDF report, a coefficient-only `filter_design.h`, Bode/error PNG
-plots, and a `firmware/` subfolder — a complete drop-in C package (header,
-biquad implementation, a generated usage example, and its own README) that
-compiles standalone with no other file from this repository. See
+plots, and a `firmware/` subfolder — a complete drop-in C package (coefficient
+header, biquad implementation, the Q14 design-function implementation itself
+for runtime recomputation, a generated usage example, and its own README)
+that compiles standalone with no other file from this repository. See
 `docs/CONTRACTS.md` §10 for the exact formats.
 
 ## Out of scope (v1)
