@@ -1,49 +1,73 @@
-"""Export layer: PDF report + C header + PNG plots (Phase 6, CONTRACTS.md §10, §13).
+"""Export layer: PDF report + C source package + PNG plots (Phase 6, CONTRACTS.md §10, §13).
 
-Produces a timestamped `export_YYYYMMDD_HHMMSS/` directory containing:
+Produces a timestamped `export_YYYYMMDD_HHMMSS/` directory:
 
-- `report.pdf`            -- design summary, per-filter sections, combined
-                             chain, inline header listing, test results
-                             (CONCEPT.md §7).
-- `filter_design.h`       -- CONTRACTS.md §10 format: ASCII, LF-terminated,
-                             `#pragma once` guarded, plain integer `#define`
-                             literals (no undefined `Q14(...)` macro).
-- `bode_combined.png`     -- series-cascade Bode plot.
-- `bode_<kind>_<n>.png`   -- one per chain block, `<n>` = 1-indexed chain
-                             position (CONCEPT.md §7 naming).
-- `error_sweep_<n>.png`   -- coefficient-accuracy sweep plot per block, for
-                             all four filter kinds. LP/HP/AP sweep `fc`
-                             directly; BP sweeps its center frequency while
-                             holding its configured bandwidth fixed, clamped
-                             at the `[100, fc_max(fs)]` domain edges
-                             (CONTRACTS.md §6.3) -- see `_sweep_design_at()`.
-- `firmware/`             -- a complete, self-contained C package that a
+- `design.iirfilt`        -- the CURRENT chain config, written via
+                             `project_file.save_project()`. A fixed filename
+                             every time, independent of whatever the user has
+                             separately opened/saved via File > Save/Save As,
+                             so this export directory round-trips to exactly
+                             the chain state that was exported.
+- `source/`               -- the complete, self-contained C deliverable a
                              firmware integrator can copy into another
-                             project as-is (CONTRACTS.md §10). Top level:
-                             generated coefficients (`filter_design.h`), a
-                             generated cascade-wiring `example.c`, and
-                             `README.md`. Nested under
-                             `firmware/biquad_q14/`: every filter *source*
-                             file -- `biquad_q14.{h,c}` and
-                             `filter_design_calc.{h,c}` (the Q14
-                             design-function implementation, renamed to
-                             avoid colliding with the generated coefficient
-                             header above). See `render_firmware_package()`
-                             below.
+                             project as-is (CONTRACTS.md §10):
+    - `biquad_q14/cfg/`      -- reserved for future user-config macros;
+                                always empty (just a directory, no files).
+    - `biquad_q14/inc/`      -- `biquad_q14.h` (the Direct Form 1 Q14 biquad
+                                header) and `filter_design_calc.h` (the Q14
+                                design-function header -- renamed from
+                                `filter_design.h` only to avoid colliding
+                                with the generated coefficient header below;
+                                both headers now sit together in this same
+                                `inc/` folder).
+    - `biquad_q14/src/`      -- `biquad_q14.c` and `filter_design_calc.c`.
+    - `biquad_q14/gen/filter_design.h` -- the GENERATED per-design
+                                coefficient header (`FILT<n>_*` defines,
+                                `render_header(snapshot)`'s output) -- the
+                                ONLY copy of this file anywhere in the
+                                export.
+    - `app_template/example.c` -- generated cascade-wiring demo. Sits as a
+                                SIBLING of `biquad_q14/`, not its parent, so
+                                its own `#include`s are bare names and
+                                compiling it needs an explicit `-I` flag
+                                pointed at `biquad_q14/inc` rather than
+                                relying on quoted-include same/child-directory
+                                resolution.
+    - `README.md`            -- integration instructions for this layout.
 
-The top-level `filter_design.h` above is deliberately coefficient-only, unchanged
-from the original design (CONCEPT.md §7's export file listing enumerates exactly
-the files above it; `biquad_q14.{h,c}` stays firmware reference source in this
-repository's own `src/c/` tree, not duplicated at the top level). The `firmware/`
-subfolder is a separate, additive output that *does* bundle a generated,
-standalone-package variant of `biquad_q14.{h,c}` and the Q14 design-function
-implementation (`filter_design_calc.{h,c}`, renamed from `filter_design.{h,c}`
--- see `render_firmware_package()`, `README.md` §6, and
-`tests/test_firmware_package.py`, which proves that package compiles, links,
-and runs correctly, fully standalone, with GCC, and that its bundled design
-functions produce the same Q14 coefficients as the ctypes `NativeBackend`
-(itself cross-checked against the Python/scipy "ideal" coefficients in
-`tests/test_native_coefficients.py`).
+  The canonical compile command (used consistently in `source/README.md`,
+  in the C validation step below, and in this suite's own tests):
+
+      gcc -Wall -Wextra -Werror -std=c11 -I biquad_q14/inc app_template/example.c
+          biquad_q14/src/biquad_q14.c biquad_q14/src/filter_design_calc.c -o demo -lm
+
+  (cwd = `source/`; pass absolute/relative paths from elsewhere as needed).
+
+  Never hand-duplicates the real DSP/design logic: `biquad_q14.c` is a
+  byte-for-byte verbatim copy of `src/c/biquad_q14.c`, and
+  `filter_design_calc.{h,c}` are verbatim copies of `src/c/filter_design.{h,c}`
+  except for one repointed `#include` line each -- so a change to either
+  real implementation propagates to the next export automatically. See
+  `render_source_package()` below.
+- `reports/`              -- everything a human reads:
+    - `biquad_q14_report.pdf` -- design summary, per-filter sections,
+                                combined chain, inline header listing, test
+                                results (CONCEPT.md §7).
+    - `figures/bode_combined.png`   -- series-cascade Bode plot.
+    - `figures/bode_<kind>_<n>.png` -- one per chain block, `<n>` =
+                                1-indexed chain position (CONCEPT.md §7
+                                naming).
+    - `figures/error_sweep_<n>.png` -- coefficient-accuracy sweep plot per
+                                block, for all four filter kinds. LP/HP/AP
+                                sweep `fc` directly; BP sweeps its center
+                                frequency while holding its configured
+                                bandwidth fixed, clamped at the
+                                `[100, fc_max(fs)]` domain edges (CONTRACTS.md
+                                §6.3) -- see `_sweep_design_at()`.
+    - `test/test_summary.txt` -- PASS/FAIL/SKIPPED verdict from compiling
+                                and running the just-written `source/`
+                                package against this export's own snapshot
+                                data -- see `run_c_validation()` below.
 
 Two-stage design:
 
@@ -57,21 +81,30 @@ Two-stage design:
    (position-based names are the export-facing identity; stable ids stay an
    application-state concern, CONTRACTS.md §12).
 2. `export_design()` takes that frozen snapshot and writes the file set,
-   wrapping filesystem/plotting/PDF failures in `ExportError` so callers get
-   an actionable message instead of a bare `OSError` traceback.
+   wrapping filesystem/plotting/PDF/project-file failures in `ExportError`
+   so callers get an actionable message instead of a bare `OSError`
+   traceback. The C validation step (`run_c_validation()`) is the one
+   deliberate exception to that: it compiles and runs the just-written
+   `source/` package as a real cross-check, but by design can NEVER raise
+   `ExportError` or otherwise fail the export -- a missing compiler, a
+   compile/run failure, or a numeric mismatch is recorded as a FAIL/SKIPPED
+   verdict in `test_summary.txt` instead, so a broken validation step never
+   takes down an otherwise-successful export.
 
 Export is blocked only by invalid parameters on an *enabled* block, an empty
 chain, or a chain with no enabled block (§13's "only by *invalid*
 parameters" carve-out) -- a design that fails the 0.1 dB response check
 still exports; the report documents the failure instead of suppressing it.
 A disabled block (`ChainBlock.enabled = False`) is a bypass: it is dropped
-from the snapshot, header, PNGs, and PDF filter sections entirely, and an
-invalid disabled block never blocks export.
+from the snapshot, header, PNGs, PDF filter sections, `source/` package, and
+C validation entirely, and an invalid disabled block never blocks export.
 """
 
 from __future__ import annotations
 
 import math
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -99,13 +132,34 @@ from error_analysis import (
 )
 from filters.base import Coefficients, FilterDesign, NativeBackend, Q14Coefficients, fc_max
 from filters.chain import BlockKind, ChainBlock, FilterChain
+from project_file import PROJECT_FILE_EXTENSION, ProjectFileError, save_project
 
-# Reference firmware source (CONTRACTS.md §7, §10) -- render_firmware_package()
-# below reads src/c/biquad_q14.{h,c} and src/c/filter_design.h from here.
+# Reference C source (CONTRACTS.md §7, §10) -- render_source_package() below
+# reads src/c/biquad_q14.{h,c} and src/c/filter_design.h from here.
 C_SRC_DIR = Path(__file__).resolve().parent.parent / "c"
 
-# Sample count for the illustrative demo main() in the generated firmware/example.c.
+# Sample count for the illustrative demo main() in the generated
+# app_template/example.c.
 FIRMWARE_EXAMPLE_N_SAMPLES = 32
+
+# -- Export directory layout (see module docstring above) --------------------
+
+SOURCE_DIRNAME = "source"
+REPORTS_DIRNAME = "reports"
+FIGURES_DIRNAME = "figures"
+TEST_DIRNAME = "test"
+BIQUAD_DIRNAME = "biquad_q14"
+APP_TEMPLATE_DIRNAME = "app_template"
+CFG_DIRNAME = "cfg"
+INC_DIRNAME = "inc"
+SRC_DIRNAME = "src"
+GEN_DIRNAME = "gen"
+
+PDF_FILENAME = "biquad_q14_report.pdf"
+# Kept in sync with project_file.py's own extension constant rather than
+# hardcoding ".iirfilt" here -- see module docstring.
+PROJECT_FILENAME = "design" + PROJECT_FILE_EXTENSION
+TEST_SUMMARY_FILENAME = "test_summary.txt"
 
 # CONTRACTS.md §11: response pass/fail badge threshold (max amplitude error).
 RESPONSE_PASS_THRESHOLD_DB = 0.1
@@ -317,7 +371,9 @@ def _filter_description(block: BlockSnapshot) -> str:
 
 
 def render_header(snapshot: ExportSnapshot) -> str:
-    """Renders `filter_design.h` text per CONTRACTS.md §10.
+    """Renders the generated `filter_design.h` text per CONTRACTS.md §10
+    (written to `source/biquad_q14/gen/filter_design.h` -- see
+    `render_source_package()`).
 
     ASCII-only: the doc's illustrative example uses a Unicode em dash in the
     banner comment, which would violate the explicit ASCII requirement here
@@ -354,7 +410,7 @@ def _write_text_lf(path: Path, text: str, *, encoding: str = "ascii") -> None:
     """Writes `text` as raw bytes (not text mode) so LF line endings survive
     unconditionally, even when this runs on Windows (CONTRACTS.md §10: "even
     when generated on Windows"). `encoding="ascii"` (the default) matches the
-    generated coefficient header's own ASCII requirement; the firmware
+    generated coefficient header's own ASCII requirement; the source
     package's other files (copied/derived from src/c/*, which contain
     non-ASCII punctuation in comments) pass encoding="utf-8" instead."""
     try:
@@ -372,61 +428,53 @@ def _write_header(path: Path, snapshot: ExportSnapshot) -> None:
     _write_text_lf(path, render_header(snapshot))
 
 
-# -- Drop-in firmware package (firmware/ subfolder) ----------------------------
+# -- Source package (source/ subfolder) ---------------------------------------
 #
-# Additive to the top-level export files above, which stay byte-for-byte
-# unchanged (CONCEPT.md §7's original file listing, CONTRACTS.md §10). This
-# subfolder bundles a complete, self-contained C package -- generated
+# The complete, self-contained C deliverable (CONTRACTS.md §10): generated
 # coefficients, the biquad implementation, the Q14 design-function
-# implementation, and a cascade-wiring example -- that a firmware integrator
-# can copy into an external project as-is, reversing the original "does not
-# bundle biquad_q14.*/filter_design.c" decision for this new, separate output
-# only. Never hand-duplicates the real DSP/design logic: both biquad_q14.c
-# and filter_design.c are copied verbatim from src/c/ (the latter's own
+# implementation, and a cascade-wiring example -- everything a firmware
+# integrator needs, copyable into an external project as-is. Never
+# hand-duplicates the real DSP/design logic: both biquad_q14.c and
+# filter_design.c are copied verbatim from src/c/ (the latter's own
 # `#include` line is repointed, nothing else), so a change to either real
 # implementation propagates to the next export automatically.
 #
-# Layout within firmware/: the two files an integrator actually touches --
-# the frozen-coefficient `filter_design.h` and the generated `example.c`
-# wiring up this specific chain -- sit at the top level, alongside
-# `README.md`. Every actual filter *source* file (the biquad implementation
-# and the Q14 design-function pair) is nested one level down, under
-# `firmware/FIRMWARE_FILTER_SOURCES_DIRNAME/`, so the top level stays to
-# just "what do I call" and "what do I read" rather than mixing those in
-# with "what compiles the DSP". `example.c`'s own `#include`s are the only
-# thing that need to know about that nesting (see render_firmware_example);
-# every file *inside* the subfolder still refers to its sibling by a bare
-# name, unaffected by where the subfolder itself sits.
+# Layout within source/: `biquad_q14/` groups every filter *source* file
+# into `cfg/` (reserved, empty), `inc/` (headers), `src/` (implementation),
+# and `gen/` (the generated, per-design coefficient header) -- so "what do I
+# configure", "what do I read", "what compiles", and "what's generated for
+# this specific design" each get their own directory. `app_template/` is a
+# SIBLING of `biquad_q14/`, not its parent, holding the generated `example.c`
+# demo. Because `app_template/` and `biquad_q14/` are siblings rather than
+# parent/child, `example.c`'s own `#include`s are bare names (quoted-include
+# same-directory resolution alone would not find them) and compiling it
+# needs an explicit `-I biquad_q14/inc` flag -- see the canonical compile
+# command in this module's docstring.
 #
 # filter_design.{h,c} (the design-function pair: filter_design_lp/hp/bp/ap/pk())
 # are bundled here under the renamed `filter_design_calc.{h,c}` -- this
 # package already has a *generated coefficient* header also named
-# `filter_design.h` (above), so the real source pair can't keep its own name
-# without colliding. Bundling these lets firmware recompute Q14 coefficients
-# at runtime (e.g. to retune a filter) instead of only ever loading the
-# frozen constants in `filter_design.h`; `tests/test_firmware_package.py`
-# proves the bundled functions produce the same output, standalone, as the
-# ctypes `NativeBackend` used everywhere else in this suite (itself
-# cross-checked against the Python/scipy "ideal" coefficients in
-# `tests/test_native_coefficients.py`).
+# `filter_design.h` (under biquad_q14/gen/), so the real source pair can't
+# keep its own name without ambiguity. Bundling these lets firmware recompute
+# Q14 coefficients at runtime (e.g. to retune a filter) instead of only ever
+# loading the frozen constants in `biquad_q14/gen/filter_design.h`;
+# tests/test_source_package.py proves the bundled functions produce the same
+# output, standalone, as the ctypes `NativeBackend` used everywhere else in
+# this suite (itself cross-checked against the Python/scipy "ideal"
+# coefficients in `tests/test_native_coefficients.py`).
 
 _DESIGN_INCLUDE_LINE = '#include "filter_design.h"'
 _DESIGN_CALC_HEADER_NAME = "filter_design_calc.h"
 
-# Subfolder (under firmware/) holding every filter *source* file -- the
-# biquad implementation and the Q14 design-function pair -- as opposed to
-# the generated coefficients / usage example / README at firmware/'s own
-# top level. See the module-section comment above.
-FIRMWARE_FILTER_SOURCES_DIRNAME = "biquad_q14"
-
 
 def render_standalone_biquad_header(src_dir: Path = C_SRC_DIR) -> str:
-    """Renders a firmware-package variant of src/c/biquad_q14.h: its
+    """Renders a source-package variant of src/c/biquad_q14.h: its
     `#include "filter_design.h"` line is repointed at the bundled, renamed
-    `filter_design_calc.h` (see render_firmware_design_calc_source below)
-    instead of the real src/c/filter_design.h -- avoiding a naming collision
-    with the *generated coefficient* header also named `filter_design.h` in
-    this same package (see render_firmware_package).
+    `filter_design_calc.h` (see render_design_calc_source below) instead of
+    the real src/c/filter_design.h -- avoiding ambiguity with the *generated
+    coefficient* header, also named `filter_design.h`, that sits in this
+    same package (see render_source_package). Both headers end up together,
+    by bare name, under `source/biquad_q14/inc/`.
     """
     try:
         biquad_h_text = (src_dir / "biquad_q14.h").read_text(encoding="utf-8")
@@ -436,19 +484,19 @@ def render_standalone_biquad_header(src_dir: Path = C_SRC_DIR) -> str:
     if _DESIGN_INCLUDE_LINE not in biquad_h_text:
         raise ExportError(
             f"expected {src_dir / 'biquad_q14.h'} to contain the literal line "
-            f"{_DESIGN_INCLUDE_LINE!r} -- firmware package generation is out of sync "
+            f"{_DESIGN_INCLUDE_LINE!r} -- source package generation is out of sync "
             "with the source"
         )
     return biquad_h_text.replace(_DESIGN_INCLUDE_LINE, f'#include "{_DESIGN_CALC_HEADER_NAME}"', 1)
 
 
-def render_firmware_design_calc_source(src_dir: Path = C_SRC_DIR) -> str:
-    """Renders the firmware-package variant of src/c/filter_design.c: a
+def render_design_calc_source(src_dir: Path = C_SRC_DIR) -> str:
+    """Renders the source-package variant of src/c/filter_design.c: a
     verbatim copy except its own `#include "filter_design.h"` line is
     repointed at the bundled, renamed `filter_design_calc.h` -- the same
-    collision `render_standalone_biquad_header` above avoids. The paired
+    ambiguity `render_standalone_biquad_header` above avoids. The paired
     header (src/c/filter_design.h) needs no such rewrite: it has no
-    `#include` of its own, so `render_firmware_package` copies it verbatim
+    `#include` of its own, so `render_source_package` copies it verbatim
     under the `filter_design_calc.h` name.
     """
     try:
@@ -459,7 +507,7 @@ def render_firmware_design_calc_source(src_dir: Path = C_SRC_DIR) -> str:
     if _DESIGN_INCLUDE_LINE not in design_c_text:
         raise ExportError(
             f"expected {src_dir / 'filter_design.c'} to contain the literal line "
-            f"{_DESIGN_INCLUDE_LINE!r} -- firmware package generation is out of sync "
+            f"{_DESIGN_INCLUDE_LINE!r} -- source package generation is out of sync "
             "with the source"
         )
     return design_c_text.replace(_DESIGN_INCLUDE_LINE, f'#include "{_DESIGN_CALC_HEADER_NAME}"', 1)
@@ -468,11 +516,12 @@ def render_firmware_design_calc_source(src_dir: Path = C_SRC_DIR) -> str:
 def _filter_design_call(block: BlockSnapshot, fs: float, coeffs_var: str) -> str:
     """The `filter_design_*()` statement matching `block`'s kind, with its
     own exported design params as literal float args -- see
-    render_firmware_example(). Each literal is `repr()`-formatted (shortest
-    decimal that round-trips to the exact same double bit pattern) and
-    written with no `f` suffix, so it stays a `double` literal that the C
-    compiler narrows to the `float` parameter the same way ctypes narrows
-    the identical Python double when `NativeBackend` computed this block's
+    render_app_template_example() and run_c_validation()'s design-function
+    check. Each literal is `repr()`-formatted (shortest decimal that
+    round-trips to the exact same double bit pattern) and written with no
+    `f` suffix, so it stays a `double` literal that the C compiler narrows
+    to the `float` parameter the same way ctypes narrows the identical
+    Python double when `NativeBackend` computed this block's
     `q14_coefficients` at export time -- the two computations start from a
     bit-identical float32 input, hence produce bit-identical output.
     """
@@ -492,7 +541,7 @@ def _filter_design_call(block: BlockSnapshot, fs: float, coeffs_var: str) -> str
     raise ValueError(f"unknown filter kind {block.kind!r}")  # pragma: no cover -- BlockKind is exhaustive above
 
 
-def render_firmware_example(snapshot: ExportSnapshot) -> str:
+def render_app_template_example(snapshot: ExportSnapshot) -> str:
     """Generates a C source demonstrating the specific chain in `snapshot`:
     one biquad_q14_state_t per active block, chained in series (stage n's
     output feeds stage n+1, per CONTRACTS.md §12's series-only topology)
@@ -500,17 +549,17 @@ def render_firmware_example(snapshot: ExportSnapshot) -> str:
     per sample. `filter_chain_init()` computes each stage's Q14 coefficients
     at *runtime*, via the bundled `filter_design_calc.{h,c}` design
     functions (the same routines that produced the frozen `FILT<n>_*`
-    defines in the sibling `filter_design.h`) -- demonstrating that path
+    defines in `biquad_q14/gen/filter_design.h`) -- demonstrating that path
     rather than reading those defines directly, so firmware can recompute
     coefficients itself (e.g. to retune a filter) instead of only ever
     loading frozen constants. `main()` is an illustrative compile-and-run
-    demo only. `example.c` itself sits at firmware/'s top level while the
-    two headers it includes live one level down, under
-    `FIRMWARE_FILTER_SOURCES_DIRNAME/` (see the firmware/ layout comment
-    above `render_firmware_package`) -- hence the subfolder-qualified
-    `#include` paths below; quoted includes resolve relative to the
-    including file's own directory, so no extra `-I` flag is needed to
-    compile this file.
+    demo only.
+
+    `example.c` lives under `app_template/`, a SIBLING of `biquad_q14/` (not
+    its parent) -- so its own `#include`s below are BARE names, and
+    compiling this file requires an explicit `-I biquad_q14/inc` flag (see
+    the canonical compile command in this module's docstring); quoted-include
+    same-directory resolution alone would not find the headers.
     """
     lines = [
         "/* Generated by IIR Filter Design Suite -- example integration for the",
@@ -518,12 +567,13 @@ def render_firmware_example(snapshot: ExportSnapshot) -> str:
         " * function to call once per real sample in your own integration.",
         " * filter_chain_init() computes each stage's Q14 coefficients at",
         " * runtime via filter_design_calc.{h,c} (the same design routines",
-        " * behind the frozen FILT<n>_* defines in filter_design.h) rather",
-        " * than reading those defines directly. main() below is only a",
-        " * compile-and-run demo. */",
+        " * behind the frozen FILT<n>_* defines in biquad_q14/gen/filter_design.h)",
+        " * rather than reading those defines directly. main() below is only a",
+        " * compile-and-run demo. Compile with -I pointed at biquad_q14/inc --",
+        " * see the sibling README.md for the exact command. */",
         "",
-        f'#include "{FIRMWARE_FILTER_SOURCES_DIRNAME}/{_DESIGN_CALC_HEADER_NAME}"',
-        f'#include "{FIRMWARE_FILTER_SOURCES_DIRNAME}/biquad_q14.h"',
+        f'#include "{_DESIGN_CALC_HEADER_NAME}"',
+        '#include "biquad_q14.h"',
         "#include <stdio.h>",
         "",
     ]
@@ -563,10 +613,10 @@ def render_firmware_example(snapshot: ExportSnapshot) -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def render_firmware_readme(snapshot: ExportSnapshot) -> str:
+def render_source_readme(snapshot: ExportSnapshot) -> str:
     topology = " -> ".join(f"FILT{b.position} ({b.kind})" for b in snapshot.blocks)
     return (
-        "# Firmware package\n"
+        "# Source package\n"
         "\n"
         f"Generated by IIR Filter Design Suite, {snapshot.generated_at.isoformat()}.\n"
         f"fs = {snapshot.fs:g} Hz. Chain topology (series): {topology}.\n"
@@ -574,49 +624,49 @@ def render_firmware_readme(snapshot: ExportSnapshot) -> str:
         "This folder is self-contained -- copy it into another project as-is, no\n"
         "other file from this suite is required.\n"
         "\n"
-        "## Contents\n"
+        "## Layout\n"
         "\n"
-        "Top level -- the two files an integrator actually names/reads:\n"
-        "\n"
-        "- `filter_design.h` -- generated Q14 coefficients for this design\n"
-        "  (`FILT<n>_*` defines). Same content as the sibling top-level file\n"
-        "  one directory up (this suite's own export directory).\n"
-        "- `example.c` -- generated integration example: `filter_chain_init()`\n"
-        "  computes each stage's coefficients at runtime by calling this\n"
-        f"  design's own `filter_design_lp/hp/bp/ap/pk()` (from\n"
-        f"  `{FIRMWARE_FILTER_SOURCES_DIRNAME}/filter_design_calc.{{h,c}}` below)\n"
-        "  with its exported design parameters, then builds the cascade's\n"
-        "  state from the result; `process_chain(x)` runs one Q14 sample\n"
-        "  through the full series cascade and returns the result. `main()`\n"
-        "  is an illustrative demo only (feeds a unit impulse, prints the\n"
-        "  output) -- not part of the integration API.\n"
-        "\n"
-        f"`{FIRMWARE_FILTER_SOURCES_DIRNAME}/` -- every filter *source* file:\n"
-        "\n"
-        "- `biquad_q14.h` / `biquad_q14.c` -- the Direct Form 1 Q14 biquad\n"
-        "  implementation.\n"
-        "- `filter_design_calc.h` / `filter_design_calc.c` -- the Q14\n"
-        "  design-function implementation (`filter_design_lp/hp/bp/ap/pk()`),\n"
-        "  renamed from `filter_design.{h,c}` only to avoid colliding with the\n"
-        "  generated coefficient header above; the code is otherwise unchanged.\n"
-        "  Call these to recompute coefficients at runtime (e.g. to retune a\n"
-        "  filter); the frozen constants in `filter_design.h` above are enough\n"
-        "  if your design never changes after flashing.\n"
+        f"- `{BIQUAD_DIRNAME}/{CFG_DIRNAME}/` -- reserved for future user-config\n"
+        "  macros. Empty for now.\n"
+        f"- `{BIQUAD_DIRNAME}/{INC_DIRNAME}/` -- headers:\n"
+        "  - `biquad_q14.h` -- the Direct Form 1 Q14 biquad implementation's header.\n"
+        "  - `filter_design_calc.h` -- the Q14 design-function implementation's\n"
+        "    header (`filter_design_lp/hp/bp/ap/pk()`), renamed from\n"
+        "    `filter_design.h` only to avoid colliding with the generated\n"
+        "    coefficient header below; the code is otherwise unchanged.\n"
+        f"- `{BIQUAD_DIRNAME}/{SRC_DIRNAME}/` -- implementation: `biquad_q14.c` and\n"
+        "  `filter_design_calc.c`. Call the latter's design functions to recompute\n"
+        "  coefficients at runtime (e.g. to retune a filter); the frozen constants\n"
+        "  below are enough if your design never changes after flashing.\n"
+        f"- `{BIQUAD_DIRNAME}/{GEN_DIRNAME}/filter_design.h` -- generated Q14\n"
+        "  coefficients for this design (`FILT<n>_*` defines). The only copy of\n"
+        "  this file anywhere in this export.\n"
+        f"- `{APP_TEMPLATE_DIRNAME}/example.c` -- generated integration example:\n"
+        "  `filter_chain_init()` computes each stage's coefficients at runtime by\n"
+        "  calling this design's own `filter_design_lp/hp/bp/ap/pk()` (from\n"
+        f"  `{BIQUAD_DIRNAME}/{SRC_DIRNAME}/filter_design_calc.c`) with its exported\n"
+        "  design parameters, then builds the cascade's state from the result;\n"
+        "  `process_chain(x)` runs one Q14 sample through the full series cascade\n"
+        "  and returns the result. `main()` is an illustrative demo only (feeds a\n"
+        "  unit impulse, prints the output) -- not part of the integration API.\n"
         "\n"
         "## Integration\n"
         "\n"
         "1. Copy this folder into your firmware project.\n"
-        f"2. Compile and link `{FIRMWARE_FILTER_SOURCES_DIRNAME}/biquad_q14.c`,\n"
-        f"   `{FIRMWARE_FILTER_SOURCES_DIRNAME}/filter_design_calc.c`, and your\n"
-        "   integration source (`example.c`, or your own file once you've\n"
-        "   copied its pattern) together -- all three are required. `example.c`'s\n"
-        f"   own `#include`s already point into `{FIRMWARE_FILTER_SOURCES_DIRNAME}/`,\n"
-        "   so no extra include path is needed as long as this folder's layout\n"
-        "   stays intact, e.g.:\n"
+        f"2. Compile and link `{APP_TEMPLATE_DIRNAME}/example.c` (or your own\n"
+        "   integration source, once you've copied its pattern),\n"
+        f"   `{BIQUAD_DIRNAME}/{SRC_DIRNAME}/biquad_q14.c`, and\n"
+        f"   `{BIQUAD_DIRNAME}/{SRC_DIRNAME}/filter_design_calc.c` together -- all\n"
+        f"   three are required. `{APP_TEMPLATE_DIRNAME}/` is a SIBLING of\n"
+        f"   `{BIQUAD_DIRNAME}/`, not its parent, so an explicit `-I` flag pointed\n"
+        f"   at `{BIQUAD_DIRNAME}/{INC_DIRNAME}` is required:\n"
         "   ```\n"
-        f"   cc example.c {FIRMWARE_FILTER_SOURCES_DIRNAME}/biquad_q14.c "
-        f"{FIRMWARE_FILTER_SOURCES_DIRNAME}/filter_design_calc.c -o demo -lm\n"
+        f"   gcc -Wall -Wextra -Werror -std=c11 -I {BIQUAD_DIRNAME}/{INC_DIRNAME} "
+        f"{APP_TEMPLATE_DIRNAME}/example.c {BIQUAD_DIRNAME}/{SRC_DIRNAME}/biquad_q14.c "
+        f"{BIQUAD_DIRNAME}/{SRC_DIRNAME}/filter_design_calc.c -o demo -lm\n"
         "   ```\n"
+        "   (run from this folder; use absolute/relative paths from elsewhere as\n"
+        "   needed.)\n"
         "3. Call `filter_chain_init()` once at startup.\n"
         "4. Call `process_chain(x)` once per input sample in your real-time loop.\n"
         "5. Remove or replace `example.c`'s `main()` -- it's a compile-and-run\n"
@@ -624,45 +674,312 @@ def render_firmware_readme(snapshot: ExportSnapshot) -> str:
     )
 
 
-def render_firmware_package(snapshot: ExportSnapshot, output_dir: Path, *, src_dir: Path = C_SRC_DIR) -> Path:
-    """Writes the `firmware/` subfolder (see module docstring) under
+def render_source_package(snapshot: ExportSnapshot, output_dir: Path, *, src_dir: Path = C_SRC_DIR) -> Path:
+    """Writes the `source/` subfolder (see module docstring) under
     `output_dir` and returns its path.
 
-    Layout: `filter_design.h`, `example.c`, and `README.md` sit at
-    `firmware/`'s own top level; every filter *source* file (the biquad
-    implementation and the Q14 design-function pair) is nested under
-    `firmware/FIRMWARE_FILTER_SOURCES_DIRNAME/` -- see the layout comment
-    above this module's firmware-package section.
+    Layout: `biquad_q14/{cfg,inc,src,gen}/` groups every filter *source*
+    file plus the generated coefficient header; `app_template/example.c`
+    and `README.md` sit at `source/`'s own top level, alongside
+    `biquad_q14/` -- see the layout comment above this module's
+    source-package section.
     """
-    firmware_dir = output_dir / "firmware"
-    try:
-        firmware_dir.mkdir(parents=True, exist_ok=False)
-    except OSError as exc:
-        raise ExportError(f"failed to create firmware package directory {firmware_dir}: {exc}") from exc
+    source_dir = output_dir / SOURCE_DIRNAME
+    biquad_dir = source_dir / BIQUAD_DIRNAME
+    cfg_dir = biquad_dir / CFG_DIRNAME
+    inc_dir = biquad_dir / INC_DIRNAME
+    src_out_dir = biquad_dir / SRC_DIRNAME
+    gen_dir = biquad_dir / GEN_DIRNAME
+    app_template_dir = source_dir / APP_TEMPLATE_DIRNAME
 
-    sources_dir = firmware_dir / FIRMWARE_FILTER_SOURCES_DIRNAME
-    try:
-        sources_dir.mkdir(parents=False, exist_ok=False)
-    except OSError as exc:
-        raise ExportError(f"failed to create firmware filter-sources directory {sources_dir}: {exc}") from exc
+    for d in (source_dir, biquad_dir, cfg_dir, inc_dir, src_out_dir, gen_dir, app_template_dir):
+        try:
+            d.mkdir(parents=True, exist_ok=False)
+        except OSError as exc:
+            raise ExportError(f"failed to create source package directory {d}: {exc}") from exc
 
-    _write_text_lf(firmware_dir / "filter_design.h", render_header(snapshot))
-    _write_text_lf(sources_dir / "biquad_q14.h", render_standalone_biquad_header(src_dir), encoding="utf-8")
+    _write_text_lf(inc_dir / "biquad_q14.h", render_standalone_biquad_header(src_dir), encoding="utf-8")
     try:
         biquad_c_text = (src_dir / "biquad_q14.c").read_text(encoding="utf-8")
     except OSError as exc:
         raise ExportError(f"failed to read {src_dir / 'biquad_q14.c'}: {exc}") from exc
-    _write_text_lf(sources_dir / "biquad_q14.c", biquad_c_text, encoding="utf-8")
+    _write_text_lf(src_out_dir / "biquad_q14.c", biquad_c_text, encoding="utf-8")
     try:
         design_h_text = (src_dir / "filter_design.h").read_text(encoding="utf-8")
     except OSError as exc:
         raise ExportError(f"failed to read {src_dir / 'filter_design.h'}: {exc}") from exc
-    _write_text_lf(sources_dir / _DESIGN_CALC_HEADER_NAME, design_h_text, encoding="utf-8")
-    _write_text_lf(sources_dir / "filter_design_calc.c", render_firmware_design_calc_source(src_dir), encoding="utf-8")
-    _write_text_lf(firmware_dir / "example.c", render_firmware_example(snapshot), encoding="utf-8")
-    _write_text_lf(firmware_dir / "README.md", render_firmware_readme(snapshot), encoding="utf-8")
+    _write_text_lf(inc_dir / _DESIGN_CALC_HEADER_NAME, design_h_text, encoding="utf-8")
+    _write_text_lf(src_out_dir / "filter_design_calc.c", render_design_calc_source(src_dir), encoding="utf-8")
 
-    return firmware_dir
+    _write_header(gen_dir / "filter_design.h", snapshot)
+
+    _write_text_lf(app_template_dir / "example.c", render_app_template_example(snapshot), encoding="utf-8")
+    _write_text_lf(source_dir / "README.md", render_source_readme(snapshot), encoding="utf-8")
+
+    return source_dir
+
+
+# -- C validation step (NEW; see module docstring) ----------------------------
+#
+# A production compile+run+cross-check step, run against this export's own
+# freshly-written source/ files, modeled on the dev-only proof in
+# tests/test_source_package.py (_build_and_run_detached_copy() and
+# test_generated_source_package_design_functions_match_native_backend()) --
+# same GCC-compile approach, same numerical cross-checks -- but living here
+# as production code so it also runs in a packaged/installed build that
+# ships no pytest and no tests/ or source/ tree of its own, and so it never
+# recursively re-invokes export_design() the way shelling out to `pytest`
+# at runtime would (those dev tests build their own fixture via
+# export_design() itself).
+#
+# Hard requirement (matches this module's own "export is never blocked by a
+# failing design" philosophy, one step further): this step must NEVER raise
+# ExportError, or any other exception, out to export_design(). Every failure
+# mode -- gcc missing, a non-zero compile/run exit, a timed-out subprocess,
+# or a numeric mismatch -- is caught and turned into a PASS/FAIL/SKIPPED
+# verdict line (plus detail) in test_summary.txt instead.
+
+_C_COMPILE_TIMEOUT_S = 30
+_C_RUN_TIMEOUT_S = 10
+
+
+@dataclass(frozen=True)
+class _CCheckResult:
+    status: str  # "PASS" | "FAIL" | "SKIPPED"
+    detail: str
+
+
+def _compile_and_run(compile_cmd: list[str], run_cmd: list[str]) -> tuple[_CCheckResult | None, list[str] | None]:
+    """Runs `compile_cmd` then `run_cmd` (30s / 10s timeouts, matching this
+    suite's existing gcc-based test conventions).
+
+    Returns `(None, stdout_lines)` if both steps succeeded -- the caller does
+    its own numeric comparison and turns that into the final `_CCheckResult`
+    -- or `(result, None)`, already a terminal SKIPPED/FAIL `_CCheckResult`,
+    for gcc missing, a non-zero exit, or a timeout.
+    """
+    try:
+        compile_proc = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=_C_COMPILE_TIMEOUT_S)
+    except FileNotFoundError:
+        return _CCheckResult("SKIPPED", "gcc not found on PATH -- C validation skipped."), None
+    except subprocess.TimeoutExpired:
+        return _CCheckResult("FAIL", f"compile timed out after {_C_COMPILE_TIMEOUT_S}s."), None
+    if compile_proc.returncode != 0:
+        return (
+            _CCheckResult("FAIL", f"compile failed (exit {compile_proc.returncode}):\n{compile_proc.stderr}"),
+            None,
+        )
+
+    try:
+        run_proc = subprocess.run(run_cmd, capture_output=True, text=True, timeout=_C_RUN_TIMEOUT_S)
+    except FileNotFoundError:
+        return _CCheckResult("FAIL", f"compiled binary {run_cmd[0]!r} could not be executed."), None
+    except subprocess.TimeoutExpired:
+        return _CCheckResult("FAIL", f"run timed out after {_C_RUN_TIMEOUT_S}s."), None
+    if run_proc.returncode != 0:
+        return _CCheckResult("FAIL", f"run failed (exit {run_proc.returncode}): {run_proc.stderr}"), None
+
+    return None, run_proc.stdout.split()
+
+
+def _run_cascade_check(
+    snapshot: ExportSnapshot,
+    app_template_dir: Path,
+    inc_dir: Path,
+    src_out_dir: Path,
+    backend: NativeBackend,
+    tmp_dir: Path,
+) -> _CCheckResult:
+    """Compiles+runs app_template/example.c against the freshly-written
+    biquad_q14 sources (canonical compile command, module docstring) and
+    cross-checks its printed samples against `backend.process_samples()`
+    chained stage-by-stage across `snapshot.blocks` -- the same cross-check
+    as tests/test_source_package.py's
+    test_generated_source_package_compiles_links_and_runs_standalone.
+    """
+    binary = tmp_dir / "cascade_demo"
+    compile_cmd = [
+        "gcc",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-std=c11",
+        "-I",
+        str(inc_dir),
+        str(app_template_dir / "example.c"),
+        str(src_out_dir / "biquad_q14.c"),
+        str(src_out_dir / "filter_design_calc.c"),
+        "-o",
+        str(binary),
+        "-lm",
+    ]
+    result, stdout_tokens = _compile_and_run(compile_cmd, [str(binary)])
+    if result is not None:
+        return result
+
+    try:
+        samples = [int(tok) for tok in stdout_tokens]
+    except ValueError as exc:
+        return _CCheckResult("FAIL", f"could not parse example.c output as integers: {exc}")
+
+    if len(samples) != FIRMWARE_EXAMPLE_N_SAMPLES:
+        return _CCheckResult(
+            "FAIL", f"expected {FIRMWARE_EXAMPLE_N_SAMPLES} printed samples, got {len(samples)}."
+        )
+
+    impulse = [Q14Coefficients.SCALE] + [0] * (FIRMWARE_EXAMPLE_N_SAMPLES - 1)
+    expected = impulse
+    for block_snap in snapshot.blocks:
+        expected = backend.process_samples(block_snap.q14_coefficients, expected)
+
+    if samples != expected:
+        mismatches = [i for i, (s, e) in enumerate(zip(samples, expected)) if s != e]
+        i0 = mismatches[0]
+        return _CCheckResult(
+            "FAIL",
+            f"cascade output mismatched at {len(mismatches)} of {FIRMWARE_EXAMPLE_N_SAMPLES} "
+            f"sample position(s), e.g. index {i0}: got {samples[i0]}, expected {expected[i0]}.",
+        )
+    return _CCheckResult(
+        "PASS",
+        f"Compiled and ran app_template/example.c; all {FIRMWARE_EXAMPLE_N_SAMPLES} output samples "
+        "matched backend.process_samples() chained stage-by-stage across the active blocks.",
+    )
+
+
+def _run_design_function_check(
+    snapshot: ExportSnapshot, inc_dir: Path, src_out_dir: Path, tmp_dir: Path
+) -> _CCheckResult:
+    """Builds a small harness calling each active block's own
+    `filter_design_lp/hp/bp/ap/pk()` (via `_filter_design_call`, the same
+    statement-builder `render_app_template_example` uses) with that block's
+    own exported params, compiles it against `filter_design_calc.c`, and
+    cross-checks the printed Q14 coefficients directly against
+    `snapshot.blocks[i].q14_coefficients` (already computed via the same
+    NativeBackend at `build_snapshot()` time).
+    """
+    harness_src = tmp_dir / "design_harness.c"
+    lines = [
+        "#include <stdio.h>",
+        f'#include "{_DESIGN_CALC_HEADER_NAME}"',
+        "",
+        "static void print_coeffs(const q14_coeffs_t *c) {",
+        '    printf("%d %d %d %d %d\\n", c->b0, c->b1, c->b2, c->a1, c->a2);',
+        "}",
+        "",
+        "int main(void) {",
+        "    q14_coeffs_t c;",
+    ]
+    for block in snapshot.blocks:
+        lines.append(f"    {_filter_design_call(block, snapshot.fs, 'c')} print_coeffs(&c);")
+    lines += ["    return 0;", "}", ""]
+    harness_src.write_text("\n".join(lines), encoding="ascii")
+
+    binary = tmp_dir / "design_harness"
+    compile_cmd = [
+        "gcc",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-std=c11",
+        "-I",
+        str(inc_dir),
+        str(harness_src),
+        str(src_out_dir / "filter_design_calc.c"),
+        "-o",
+        str(binary),
+        "-lm",
+    ]
+    result, stdout_tokens = _compile_and_run(compile_cmd, [str(binary)])
+    if result is not None:
+        return result
+
+    n_blocks = len(snapshot.blocks)
+    if len(stdout_tokens) != 5 * n_blocks:
+        return _CCheckResult(
+            "FAIL",
+            f"expected {n_blocks} printed coefficient set(s) ({5 * n_blocks} integers), "
+            f"got {len(stdout_tokens)} integer(s).",
+        )
+
+    try:
+        values = [int(tok) for tok in stdout_tokens]
+    except ValueError as exc:
+        return _CCheckResult("FAIL", f"could not parse design-function harness output as integers: {exc}")
+
+    mismatches: list[tuple[str, tuple[int, ...], tuple[int, ...]]] = []
+    for i, block in enumerate(snapshot.blocks):
+        got = tuple(values[5 * i : 5 * i + 5])
+        q14 = block.q14_coefficients
+        expected = (q14.b0, q14.b1, q14.b2, q14.a1, q14.a2)
+        if got != expected:
+            mismatches.append((block.name, got, expected))
+
+    if mismatches:
+        name, got, expected = mismatches[0]
+        return _CCheckResult(
+            "FAIL",
+            f"design-function coefficients mismatched for {len(mismatches)} of {n_blocks} block(s), "
+            f"e.g. {name}: got {got}, expected {expected}.",
+        )
+    return _CCheckResult(
+        "PASS",
+        f"Compiled and ran a filter_design_lp/hp/bp/ap/pk() harness for all {n_blocks} active "
+        "block(s); printed Q14 coefficients matched snapshot.blocks[i].q14_coefficients exactly.",
+    )
+
+
+def run_c_validation(
+    snapshot: ExportSnapshot, source_dir: Path, reports_test_dir: Path, backend: NativeBackend
+) -> Path:
+    """Compiles and runs the just-written `source/` package (two checks --
+    see the module-section comment above) and writes a PASS/FAIL/SKIPPED
+    verdict to `reports_test_dir / TEST_SUMMARY_FILENAME`, returning that
+    path. NEVER raises: any unexpected failure while running the checks
+    themselves (as opposed to an expected compile/run/mismatch outcome,
+    already handled by the two check functions) is caught here as a last
+    resort and recorded as SKIPPED, so a bug in this validation step can
+    never take down export_design() itself.
+    """
+    biquad_dir = source_dir.resolve() / BIQUAD_DIRNAME
+    inc_dir = biquad_dir / INC_DIRNAME
+    src_out_dir = biquad_dir / SRC_DIRNAME
+    app_template_dir = source_dir.resolve() / APP_TEMPLATE_DIRNAME
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="iirfilt_c_validation_") as tmp:
+            tmp_dir = Path(tmp)
+            cascade = _run_cascade_check(snapshot, app_template_dir, inc_dir, src_out_dir, backend, tmp_dir)
+            design = _run_design_function_check(snapshot, inc_dir, src_out_dir, tmp_dir)
+    except Exception as exc:  # noqa: BLE001 -- last-resort guard, see docstring above
+        reason = f"C validation step raised an unexpected error: {exc!r}"
+        cascade = _CCheckResult("SKIPPED", reason)
+        design = _CCheckResult("SKIPPED", reason)
+
+    statuses = {cascade.status, design.status}
+    if statuses == {"PASS"}:
+        overall = "PASS"
+    elif "FAIL" in statuses:
+        overall = "FAIL"
+    else:
+        overall = "SKIPPED"
+
+    text = (
+        "IIR Filter Design Suite -- C validation summary\n"
+        f"Generated: {snapshot.generated_at.isoformat()}\n"
+        f"fs = {snapshot.fs:g} Hz\n"
+        "\n"
+        f"Overall: {overall}\n"
+        "\n"
+        f"[1] Cascade compile+run check: {cascade.status}\n"
+        f"    {cascade.detail}\n"
+        "\n"
+        f"[2] Design-function check: {design.status}\n"
+        f"    {design.detail}\n"
+    )
+    path = reports_test_dir / TEST_SUMMARY_FILENAME
+    _write_text_lf(path, text, encoding="utf-8")
+    return path
 
 
 # -- PNG plots -----------------------------------------------------------------
@@ -849,6 +1166,9 @@ def render_pdf(
     # 4. C header listing -- no leading PageBreak (unlike sections 2/3 above),
     # so without keepWithNext this heading could land alone at the bottom of
     # the Combined-chain page with the listing itself starting on the next.
+    # Renders render_header(snapshot) as text directly -- no file dependency,
+    # so this section is unaffected by where the generated header physically
+    # lives in the export directory (source/biquad_q14/gen/filter_design.h).
     story.append(Paragraph("C header listing (filter_design.h)", heading_style))
     for line in render_header(snapshot).splitlines():
         escaped = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace(" ", "&nbsp;")
@@ -890,12 +1210,15 @@ _TABLE_STYLE = TableStyle(
 class ExportResult:
     output_dir: Path
     snapshot: ExportSnapshot
+    project_file_path: Path
+    source_dir: Path
+    reports_dir: Path
     header_path: Path
     pdf_path: Path
     combined_bode_png: Path
     block_bode_pngs: Mapping[int, Path]
     error_sweep_pngs: Mapping[int, Path]
-    firmware_dir: Path
+    test_summary_path: Path
 
 
 def _make_export_dir(output_root: Path, generated_at: datetime) -> Path:
@@ -934,19 +1257,30 @@ def export_design(
     """Forces a fresh validation pass and writes the full export file set.
 
     Raises `ValueError` for an empty chain or any invalid block (before any
-    filesystem I/O happens), and `ExportError` for filesystem/plotting/PDF
-    failures encountered while writing the file set.
+    filesystem I/O happens), and `ExportError` for filesystem/plotting/PDF/
+    project-file failures encountered while writing the file set. The C
+    validation step (`run_c_validation()`) is the one exception: by design it
+    never raises, regardless of what it finds (see its own docstring).
     """
     snapshot = build_snapshot(chain, backend, now=now)
     output_root = Path(output_root)
     export_dir = _make_export_dir(output_root, snapshot.generated_at)
 
     try:
+        reports_dir = export_dir / REPORTS_DIRNAME
+        figures_dir = reports_dir / FIGURES_DIRNAME
+        reports_test_dir = reports_dir / TEST_DIRNAME
+        for d in (reports_dir, figures_dir, reports_test_dir):
+            try:
+                d.mkdir(parents=True, exist_ok=False)
+            except OSError as exc:
+                raise ExportError(f"failed to create directory {d}: {exc}") from exc
+
         freq = bode_grid(snapshot.fs)
 
         combined_ideal = chain.combined_ideal_response(freq)
         combined_q14 = chain.combined_q14_response(freq, backend)
-        combined_png = export_dir / "bode_combined.png"
+        combined_png = figures_dir / "bode_combined.png"
         _save_bode_png(combined_png, combined_ideal, combined_q14, "Combined chain")
 
         block_pngs: dict[int, Path] = {}
@@ -955,26 +1289,34 @@ def export_design(
             filt = block.filter
             ideal_resp = filt.ideal_response(freq)
             q14_resp = filt.q14_response(freq, backend)
-            png_path = export_dir / f"bode_{block.kind.lower()}_{block_snap.position}.png"
+            png_path = figures_dir / f"bode_{block.kind.lower()}_{block_snap.position}.png"
             _save_bode_png(png_path, ideal_resp, q14_resp, f"{block_snap.name}: {FILTER_KIND_NAMES[block.kind]}")
             block_pngs[block_snap.position] = png_path
 
             design_at = _sweep_design_at(block, chain.fs)
             if design_at is not None:
-                sweep_path = export_dir / f"error_sweep_{block_snap.position}.png"
+                sweep_path = figures_dir / f"error_sweep_{block_snap.position}.png"
                 curve_freq, curve_err = _coefficient_sweep_curve(chain.fs, design_at, backend)
                 _save_error_sweep_png(
                     sweep_path, curve_freq, curve_err, f"{block_snap.name}: {block.kind} coefficient error sweep"
                 )
                 sweep_pngs[block_snap.position] = sweep_path
 
-        header_path = export_dir / "filter_design.h"
-        _write_header(header_path, snapshot)
+        source_dir = render_source_package(snapshot, export_dir)
+        header_path = source_dir / BIQUAD_DIRNAME / GEN_DIRNAME / "filter_design.h"
 
-        firmware_dir = render_firmware_package(snapshot, export_dir)
+        # Never raises (see run_c_validation's own docstring) -- runs after
+        # source/ is fully written, against those same freshly-written files.
+        test_summary_path = run_c_validation(snapshot, source_dir, reports_test_dir, backend)
 
-        pdf_path = export_dir / "report.pdf"
+        pdf_path = reports_dir / PDF_FILENAME
         render_pdf(snapshot, pdf_path, combined_png, block_pngs)
+
+        project_file_path = export_dir / PROJECT_FILENAME
+        try:
+            save_project(chain, project_file_path)
+        except ProjectFileError as exc:
+            raise ExportError(str(exc)) from exc
     except ExportError as exc:
         # Most raise sites above already know their own path (e.g. "failed
         # to write {path}"), but not the overall export directory -- fill it
@@ -987,10 +1329,13 @@ def export_design(
     return ExportResult(
         output_dir=export_dir,
         snapshot=snapshot,
+        project_file_path=project_file_path,
+        source_dir=source_dir,
+        reports_dir=reports_dir,
         header_path=header_path,
         pdf_path=pdf_path,
         combined_bode_png=combined_png,
         block_bode_pngs=MappingProxyType(block_pngs),
         error_sweep_pngs=MappingProxyType(sweep_pngs),
-        firmware_dir=firmware_dir,
+        test_summary_path=test_summary_path,
     )

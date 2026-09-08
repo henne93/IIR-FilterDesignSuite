@@ -4,7 +4,8 @@ Interactive desktop suite for designing 2nd-order IIR filter chains
 (Butterworth Low-Pass, High-Pass, Band-Pass, All-Pass, plus a parametric
 Peak/EQ filter) for Cortex-M4 firmware targets. PyQt6 UI, ideal (float64) vs.
 Q14 fixed-point (compiled C) response comparison, and a PDF + C-header + PNG
-export pipeline with a self-contained `firmware/` drop-in package.
+export pipeline with a self-contained `source/` drop-in C package and a
+compile-time C validation step.
 
 - Product vision: [`docs/CONCEPT.md`](docs/CONCEPT.md)
 - Authoritative implementation contract (exact formulas, ABI, tolerances):
@@ -65,12 +66,22 @@ QT_QPA_PLATFORM=offscreen pytest -q
 ## Export
 
 **File ▸ Export** writes a timestamped `export_YYYYMMDD_HHMMSS/` folder
-containing a PDF report, a coefficient-only `filter_design.h`, Bode/error PNG
-plots, and a `firmware/` subfolder — a complete drop-in C package (coefficient
-header, biquad implementation, the Q14 design-function implementation itself
-for runtime recomputation, a generated usage example, and its own README)
-that compiles standalone with no other file from this repository. See
-`docs/CONTRACTS.md` §10 for the exact formats.
+containing:
+
+- `design.iirfilt` — the exported chain's own project file (round-trips to
+  exactly what was shipped, independent of any file open via File ▸ Save).
+- `source/` — a complete, self-contained drop-in C package: `biquad_q14/`
+  split into `cfg/` (reserved), `inc/` (headers), `src/` (implementation),
+  and `gen/` (the generated, per-design coefficient header), plus a sibling
+  `app_template/example.c` usage demo and a `README.md` with integration
+  instructions and the canonical compile command. Compiles standalone with
+  no other file from this repository.
+- `reports/` — `biquad_q14_report.pdf`, Bode/error PNG plots under
+  `figures/`, and a `test/test_summary.txt` recording a PASS/FAIL/SKIPPED
+  verdict from compiling and running the just-written `source/` package
+  against this export's own data (never blocks or fails the export itself).
+
+See `docs/CONTRACTS.md` §10 for the exact formats.
 
 ## Out of scope (v1)
 

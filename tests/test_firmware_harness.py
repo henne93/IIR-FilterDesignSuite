@@ -1,17 +1,16 @@
 """Generated-header firmware harness test (CONTRACTS.md §7, §10, §13).
 
-`filter_design.h` (produced by `export.render_header()`) is coefficient-only
--- plain `#define FILT<n>_*` integer literals plus `Q14_SCALE`/
-`Q14_TO_FLOAT` (CONTRACTS.md §10). It does not define `q14_coeffs_t`, the
-biquad state struct, or `process()`, and the **top-level** per-design
-`export_YYYYMMDD_*` directory does not bundle `biquad_q14.{h,c}` alongside
-it (matching CONCEPT.md §7's explicit export file listing, which lists only
-`filter_design.h`). `biquad_q14.{h,c}` stays firmware-reference source in
-this suite's own `src/c/` tree -- a firmware integrator combines the two
-themselves, exactly as this test does. (The export directory's `firmware/`
-subfolder *does* bundle a generated, standalone package -- see
-`tests/test_firmware_package.py` -- but that is a separate, additive output;
-this test is only about the top-level generated header.)
+`filter_design.h` (produced by `export.render_header()`, written to
+`source/biquad_q14/gen/filter_design.h`) is coefficient-only -- plain
+`#define FILT<n>_*` integer literals plus `Q14_SCALE`/`Q14_TO_FLOAT`
+(CONTRACTS.md §10). It does not define `q14_coeffs_t`, the biquad state
+struct, or `process()` -- a firmware integrator combines it with
+`biquad_q14.{h,c}` themselves, exactly as this test does. (The exported
+`source/` package *also* bundles a generated, standalone copy of
+`biquad_q14.{h,c}` alongside the generated header -- see
+`tests/test_source_package.py` -- but this test is only about the
+*generated coefficient header* combined with this suite's own `src/c/`
+reference source, distinct from that fully-bundled package.)
 
 Two other tests already cover the pieces on either side of that seam:
   - `test_export.py::test_generated_header_compiles_with_gcc` proves the
@@ -90,7 +89,7 @@ def test_firmware_harness_compiles_links_and_matches_ctypes_reference(tmp_path, 
 
     compile_cmd = [
         "gcc", "-Wall", "-Wextra", "-Werror", "-std=c11",
-        "-I", str(result.output_dir),  # generated filter_design.h (coefficient-only)
+        "-I", str(result.header_path.parent),  # generated filter_design.h (coefficient-only)
         "-I", str(C_SRC_DIR),          # biquad_q14.h/.c reference firmware source
         str(harness_src), str(C_SRC_DIR / "biquad_q14.c"),
         "-o", str(harness_bin), "-lm",
@@ -121,7 +120,7 @@ def test_firmware_harness_is_stateful_not_a_passthrough(tmp_path, native_backend
     harness_bin = tmp_path / "harness"
     compile_cmd = [
         "gcc", "-Wall", "-Wextra", "-Werror", "-std=c11",
-        "-I", str(result.output_dir), "-I", str(C_SRC_DIR),
+        "-I", str(result.header_path.parent), "-I", str(C_SRC_DIR),
         str(harness_src), str(C_SRC_DIR / "biquad_q14.c"),
         "-o", str(harness_bin), "-lm",
     ]

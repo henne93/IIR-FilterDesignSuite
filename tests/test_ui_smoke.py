@@ -679,8 +679,9 @@ def test_export_action_writes_full_file_set(window, monkeypatch, tmp_path):
 
     export_dirs = list(tmp_path.iterdir())
     assert len(export_dirs) == 1
-    assert (export_dirs[0] / "filter_design.h").is_file()
-    assert (export_dirs[0] / "report.pdf").is_file()
+    assert (export_dirs[0] / "design.iirfilt").is_file()
+    assert (export_dirs[0] / "source" / "biquad_q14" / "gen" / "filter_design.h").is_file()
+    assert (export_dirs[0] / "reports" / "biquad_q14_report.pdf").is_file()
 
     # Success is reported via a confirmation dialog naming the export dir.
     assert len(info_calls) == 1
@@ -749,7 +750,7 @@ def test_export_always_forces_fresh_validation_not_a_stale_cache(window, monkeyp
     window._on_export()
 
     export_dir = next(tmp_path.iterdir())
-    header_text = (export_dir / "filter_design.h").read_text()
+    header_text = (export_dir / "source" / "biquad_q14" / "gen" / "filter_design.h").read_text()
     assert "fc = 5000 Hz" in header_text
     assert "fc = 1000 Hz" not in header_text
 

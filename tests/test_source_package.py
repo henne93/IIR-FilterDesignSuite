@@ -1,13 +1,19 @@
-"""Standalone-compile proof for the generated firmware/ package (CONTRACTS.md §10).
+"""Standalone-compile proof for the generated source/ package (CONTRACTS.md §10).
 
-Distinct from test_firmware_harness.py, which proves the *top-level*
-generated header combines correctly with this suite's own src/c/biquad_q14.*
-(both are pulled in via -I flags, i.e. never actually detached from the
-repo). This file proves the stronger claim made for the firmware/ subfolder
-specifically: it is genuinely self-contained -- copy it anywhere, no
-reference to src/c/ at all, and it still compiles, links, and runs, with the
-same numerical behavior as the ctypes-backed NativeBackend used everywhere
-else in this suite.
+Distinct from test_firmware_harness.py, which proves the *generated
+coefficient* header combines correctly with this suite's own
+src/c/biquad_q14.* (both are pulled in via -I flags, i.e. never actually
+detached from the repo). This file proves the stronger claim made for the
+source/ package as a whole: it is genuinely self-contained -- copy it
+anywhere, no reference to src/c/ at all, and it still compiles, links, and
+runs, with the same numerical behavior as the ctypes-backed NativeBackend
+used everywhere else in this suite.
+
+Also distinct from export.py's own `run_c_validation()`, which runs this
+same kind of compile+run+cross-check as a *production* step against each
+export's own freshly-written (non-detached) source/ files -- see its
+docstring for why it is implemented in-process there rather than shelling
+out to pytest at runtime.
 """
 
 from __future__ import annotations
@@ -18,7 +24,7 @@ from dataclasses import astuple
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from export import FIRMWARE_FILTER_SOURCES_DIRNAME, export_design
+from export import BIQUAD_DIRNAME, export_design
 from filters import FilterChain
 
 FS = 13333.0
@@ -37,7 +43,7 @@ _DESIGN_GAIN_DB = 6.0
 
 _DESIGN_HARNESS_C = """\
 #include <stdio.h>
-#include "{sources_dir}/filter_design_calc.h"
+#include "filter_design_calc.h"
 
 static void print_coeffs(const q14_coeffs_t *c) {{
     printf("%d %d %d %d %d\\n", c->b0, c->b1, c->b2, c->a1, c->a2);
@@ -59,23 +65,28 @@ int main(void) {{
     f_high=_DESIGN_F_HIGH,
     q=_DESIGN_Q,
     gain_db=_DESIGN_GAIN_DB,
-    sources_dir=FIRMWARE_FILTER_SOURCES_DIRNAME,
 )
 
+# Canonical compile command (export.py module docstring / source/README.md):
+#   gcc -Wall -Wextra -Werror -std=c11 -I biquad_q14/inc app_template/example.c
+#       biquad_q14/src/biquad_q14.c biquad_q14/src/filter_design_calc.c -o demo -lm
 
-def _build_and_run_detached_copy(tmp_path: Path, firmware_dir: Path) -> list[int]:
-    """Copies firmware_dir to a location with no relationship to the repo,
+
+def _build_and_run_detached_copy(tmp_path: Path, source_dir: Path) -> list[int]:
+    """Copies source_dir to a location with no relationship to the repo,
     compiles it there with -I pointed only at that copy, and runs it --
     the actual "drop this folder into a project elsewhere" scenario."""
-    detached = tmp_path / "detached_elsewhere" / "firmware"
-    shutil.copytree(firmware_dir, detached)
-    sources_dir = detached / FIRMWARE_FILTER_SOURCES_DIRNAME
+    detached = tmp_path / "detached_elsewhere" / "source"
+    shutil.copytree(source_dir, detached)
+    biquad_dir = detached / BIQUAD_DIRNAME
+    app_template_dir = detached / "app_template"
 
     binary = detached / "demo"
     compile_cmd = [
         "gcc", "-Wall", "-Wextra", "-Werror", "-std=c11",
-        "-I", str(detached),  # the ONLY include path -- no src/c/ anywhere
-        str(detached / "example.c"), str(sources_dir / "biquad_q14.c"), str(sources_dir / "filter_design_calc.c"),
+        "-I", str(biquad_dir / "inc"),  # the ONLY include path -- no src/c/ anywhere
+        str(app_template_dir / "example.c"), str(biquad_dir / "src" / "biquad_q14.c"),
+        str(biquad_dir / "src" / "filter_design_calc.c"),
         "-o", str(binary), "-lm",
     ]
     compile_proc = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=30)
@@ -86,13 +97,13 @@ def _build_and_run_detached_copy(tmp_path: Path, firmware_dir: Path) -> list[int
     return [int(line) for line in run_proc.stdout.split()]
 
 
-def test_generated_firmware_package_compiles_links_and_runs_standalone(tmp_path, native_backend):
+def test_generated_source_package_compiles_links_and_runs_standalone(tmp_path, native_backend):
     chain = FilterChain(fs=FS)
     chain.add_block("LP", fc=3000.0)
     chain.add_block("HP", fc=1000.0)
     result = export_design(chain, native_backend, tmp_path / "export_root", now=FIXED_NOW)
 
-    samples = _build_and_run_detached_copy(tmp_path, result.firmware_dir)
+    samples = _build_and_run_detached_copy(tmp_path, result.source_dir)
 
     from export import FIRMWARE_EXAMPLE_N_SAMPLES
 
@@ -110,7 +121,7 @@ def test_generated_firmware_package_compiles_links_and_runs_standalone(tmp_path,
     assert samples == stage_input
 
 
-def test_generated_firmware_package_design_functions_match_native_backend(tmp_path, native_backend):
+def test_generated_source_package_design_functions_match_native_backend(tmp_path, native_backend):
     """Proves the bundled filter_design_calc.{h,c} (CONTRACTS.md §10's
     reversal of the earlier "firmware doesn't need filter_design_lp/hp/bp/ap()"
     decision) actually work, standalone, detached from src/c/ -- not just that
@@ -127,20 +138,17 @@ def test_generated_firmware_package_design_functions_match_native_backend(tmp_pa
     chain.add_block("LP", fc=3000.0)
     result = export_design(chain, native_backend, tmp_path / "export_root", now=FIXED_NOW)
 
-    detached = tmp_path / "detached_design_calc" / "firmware"
-    shutil.copytree(result.firmware_dir, detached)
-    sources_dir = detached / FIRMWARE_FILTER_SOURCES_DIRNAME
+    detached = tmp_path / "detached_design_calc" / "source"
+    shutil.copytree(result.source_dir, detached)
+    biquad_dir = detached / BIQUAD_DIRNAME
 
-    # design_harness.c sits at the detached copy's top level (same as the
-    # real example.c), so its #include of filter_design_calc.h is
-    # subfolder-qualified, matching _DESIGN_HARNESS_C's own formatting above.
     harness_src = detached / "design_harness.c"
     harness_src.write_text(_DESIGN_HARNESS_C)
     binary = detached / "design_harness"
     compile_cmd = [
         "gcc", "-Wall", "-Wextra", "-Werror", "-std=c11",
-        "-I", str(detached),  # the ONLY include path -- no src/c/ anywhere
-        str(harness_src), str(sources_dir / "filter_design_calc.c"),
+        "-I", str(biquad_dir / "inc"),  # the ONLY include path -- no src/c/ anywhere
+        str(harness_src), str(biquad_dir / "src" / "filter_design_calc.c"),
         "-o", str(binary), "-lm",
     ]
     compile_proc = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=30)
@@ -159,11 +167,11 @@ def test_generated_firmware_package_design_functions_match_native_backend(tmp_pa
     assert harness_pk == astuple(native_backend.design_pk(_DESIGN_FC, FS, _DESIGN_Q, _DESIGN_GAIN_DB))
 
 
-def test_generated_firmware_package_is_stateful_not_a_passthrough(tmp_path, native_backend):
+def test_generated_source_package_is_stateful_not_a_passthrough(tmp_path, native_backend):
     chain = FilterChain(fs=FS)
     chain.add_block("LP", fc=3000.0)
     result = export_design(chain, native_backend, tmp_path / "export_root", now=FIXED_NOW)
 
-    samples = _build_and_run_detached_copy(tmp_path, result.firmware_dir)
+    samples = _build_and_run_detached_copy(tmp_path, result.source_dir)
 
     assert any(s != 0 for s in samples[1:]), "expected a non-trivial IIR tail after the impulse"

@@ -547,7 +547,8 @@ float and a note in a trailing comment for human readability:
 #define FILT1_A2  9695    // 0.59158379f
 ```
 
-- File name: `filter_design.h`, `#pragma once` guard.
+- File name: `filter_design.h` (written to `source/biquad_q14/gen/filter_design.h`
+  -- see below), `#pragma once` guard.
 - Filter numbering: `FILT<n>`, 1-indexed by chain position (left-to-right); renumbered
   on every reorder/add/delete so numbering is always contiguous `1..N`.
 - Timestamp: ISO 8601 **with explicit UTC offset** (`datetime.now().astimezone().isoformat()`),
@@ -556,30 +557,64 @@ float and a note in a trailing comment for human readability:
 - Coefficient order in the header matches §2: `B0, B1, B2, A1, A2`.
 - ASCII, LF line endings, even when generated on Windows (firmware-side diffability).
 
-**The top-level export files above are unchanged: `filter_design.h` stays
-coefficient-only, and the top-level of the export directory does not bundle
-`biquad_q14.h`/`biquad_q14.c`.** CONCEPT.md §7's export directory listing
-enumerates exactly `report.pdf`, `filter_design.h`, `bode_combined.png`,
-`bode_<type>_<n>.png`, and `error_sweep_<n>.png` at the top level -- no
-`biquad_q14.*` entry there. A firmware integrator can still combine the
-top-level generated header with `src/c/biquad_q14.{h,c}` themselves, exactly
-as before; that combination is proven by `tests/test_firmware_harness.py`,
-which compiles a harness `#include`-ing a freshly generated header together
-with `biquad_q14.h`, links against `biquad_q14.c` with `gcc -Wall -Wextra
--Werror`, runs the resulting binary, and cross-checks its output against the
-ctypes `process_impulse()` path used elsewhere in this suite.
+**Export directory layout (revised -- decision log entry 15 below):** every
+export produces
 
-**Reversed for a new, separate output only: the export directory's
-`firmware/` subfolder *does* bundle a complete, self-contained C package**
-(added after the original "does not bundle" decision above, which stands for
-the top-level files only). It contains: the same coefficient header (also
-named `filter_design.h`, generated fresh, byte-identical to the top-level
-one); the Q14 design-function implementation itself
-(`filter_design_lp/hp/bp/ap/pk()`), copied verbatim from `src/c/filter_design.{h,c}`
-but renamed to `filter_design_calc.{h,c}` -- the rename is the only change,
-forced by the naming collision with the generated coefficient header sitting
-in the same package, which keeps the `filter_design.h` name; a `biquad_q14.h`
-variant whose `#include "filter_design.h"` line is repointed at the bundled
+```
+export_YYYYMMDD_HHMMSS/
+├── design.iirfilt                      current chain config, project_file.save_project()
+├── source/                             self-contained C deliverable
+│   ├── biquad_q14/
+│   │   ├── cfg/                        reserved for future user-config macros (empty)
+│   │   ├── inc/
+│   │   │   ├── biquad_q14.h            repoints its filter_design.h include at filter_design_calc.h
+│   │   │   └── filter_design_calc.h    verbatim copy of src/c/filter_design.h
+│   │   ├── src/
+│   │   │   ├── biquad_q14.c            verbatim copy of src/c/biquad_q14.c
+│   │   │   └── filter_design_calc.c    verbatim copy of src/c/filter_design.c except one #include line
+│   │   └── gen/
+│   │       └── filter_design.h         GENERATED per-design Q14 coefficients (FILT<n>_* defines) --
+│   │                                   the ONLY copy of this file anywhere in the export
+│   ├── app_template/
+│   │   └── example.c                   generated cascade-wiring demo
+│   └── README.md                       integration instructions
+└── reports/
+    ├── biquad_q14_report.pdf           renamed from report.pdf; content/generation unchanged
+    ├── figures/
+    │   ├── bode_combined.png
+    │   ├── bode_<kind>_<n>.png
+    │   └── error_sweep_<n>.png         (moved from the export root; no content change)
+    └── test/
+        └── test_summary.txt            C compile+run validation result (see below)
+```
+
+`design.iirfilt` is written unconditionally, every export, via
+`project_file.save_project(chain, path)` -- a fixed filename (`PROJECT_FILENAME`
+in `export.py`, built from `project_file.PROJECT_FILE_EXTENSION` rather than
+hardcoding `.iirfilt` a second time), independent of whatever project file the
+user separately has open via File ▸ Save/Save As, so this export directory
+round-trips to exactly the chain state that was exported. It captures the
+*full* chain (including disabled/invalid blocks, per §15), not just the
+active blocks the rest of the export covers.
+
+The old top-level, coefficient-only `filter_design.h` is gone: `source/biquad_q14/gen/filter_design.h`
+is now the only copy of the generated header anywhere in the export. The
+PDF's "C header listing" section (item 4 below) is unaffected -- it renders
+`render_header(snapshot)` as text directly, with no file dependency.
+`tests/test_firmware_harness.py` (renamed target path, same intent) still
+proves this generated header combines correctly with this suite's own
+`src/c/biquad_q14.{h,c}` reference source, `-I`-ing the new `gen/` directory.
+
+**`source/` bundles a complete, self-contained C package** (unchanged intent
+from the original `firmware/` subfolder, restructured -- see decision log
+entries 10/13/14 below for that history). It contains: the same coefficient
+header, generated fresh, at `source/biquad_q14/gen/filter_design.h`; the Q14
+design-function implementation itself (`filter_design_lp/hp/bp/ap/pk()`),
+copied verbatim from `src/c/filter_design.{h,c}` but renamed to
+`filter_design_calc.{h,c}` -- the rename is the only change, still forced by
+the naming collision with the generated coefficient header, which keeps the
+`filter_design.h` name; a `biquad_q14.h` variant whose
+`#include "filter_design.h"` line is repointed at the bundled
 `filter_design_calc.h` (same collision, same fix) instead of pulling in the
 generated coefficient header; a byte-for-byte verbatim copy of
 `src/c/biquad_q14.c` (never hand-duplicated, so Feature-A-style changes to
@@ -587,51 +622,86 @@ the real implementation propagate to the next export automatically); a
 generated `example.c` wiring up the *specific* chain being exported (one
 `biquad_q14_state_t` per active block, chained in series through a
 `process_chain()` function, matching §12's series-only topology); and a
-`README.md` with integration instructions. `example.c` itself now
-demonstrates the bundled design functions rather than the frozen defines:
+`README.md` with integration instructions. `example.c` demonstrates the
+bundled design functions rather than the frozen defines:
 `filter_chain_init()` calls each block's `filter_design_lp/hp/bp/ap/pk()`
 with that block's own exported design parameters as literal float args
 (e.g. `filter_design_lp(3000.0, 13333.0, &coeffs1)`), not the `FILT<n>_*`
-values from `filter_design.h`. `render_firmware_package()` (`export.py`)
-produces all of this from the same `ExportSnapshot` used elsewhere, with no
-new data model. Bundling the design functions (reversing an earlier,
-narrower decision that firmware never needs them since coefficients are
-"already frozen constants") lets a firmware integrator recompute Q14
-coefficients at runtime -- e.g. to retune a filter -- instead of only ever
-loading the frozen defines in `filter_design.h`. This is proven fully
-self-contained -- not just asserted -- by `tests/test_firmware_package.py`,
-which copies the generated `firmware/` folder to a location with no
-relationship to this repository, compiles it there with `-I` pointed only at
-that copy (no reference to `src/c/` at all), runs the binary, and
-cross-checks its output bit-exactly against the ctypes
-`NativeBackend.process_samples()` path used elsewhere in this suite; a
-further test in that file compiles a small harness calling
-`filter_design_lp/hp/bp/ap/pk()` directly from the detached
+values from `filter_design.h`. `render_source_package()` (`export.py`,
+renamed from `render_firmware_package()`) produces all of this from the same
+`ExportSnapshot` used elsewhere, with no new data model. This is proven
+fully self-contained -- not just asserted -- by `tests/test_source_package.py`
+(renamed from `test_firmware_package.py`), which copies the generated
+`source/` folder to a location with no relationship to this repository,
+compiles it there with `-I` pointed only at that copy's `biquad_q14/inc`
+(no reference to `src/c/` at all), runs the binary, and cross-checks its
+output bit-exactly against the ctypes `NativeBackend.process_samples()` path
+used elsewhere in this suite; a further test in that file compiles a small
+harness calling `filter_design_lp/hp/bp/ap/pk()` directly from the detached
 `filter_design_calc.{h,c}` pair and cross-checks the resulting Q14
 coefficients bit-exactly against `NativeBackend.design_lp/hp/bp/ap/pk()` --
 which is itself the same source, compiled unrenamed, and validated against
 the Python/scipy "ideal" coefficients across the full parameter domain by
 `tests/test_native_coefficients.py` (§4/§6/§11). See README.md §6.
 
-**Internal layout of `firmware/`:** only the two files an integrator
-actually names or reads directly sit at `firmware/`'s own top level --
-`filter_design.h` (the frozen coefficients) and the generated `example.c`
-(the usage/integration example) -- alongside `README.md`. Every actual
-filter *source* file is nested one level down, under `firmware/biquad_q14/`:
-`biquad_q14.{h,c}` and the renamed `filter_design_calc.{h,c}`. This groups
-"all the DSP/design C source" together, separate from the two files meant
-for direct consumption. `example.c`'s own `#include`s are the only thing
-that need to know about the nesting (`#include
-"biquad_q14/filter_design_calc.h"`, `#include "biquad_q14/biquad_q14.h"`);
-every file *inside* `biquad_q14/` still refers to its sibling by a bare
-name (e.g. `biquad_q14.h`'s own `#include "filter_design_calc.h"`),
-unaffected by where the subfolder itself sits. No extra `-I` flag is
-required to compile any of it -- quoted includes resolve relative to the
-including file's own directory first, so `example.c`'s subfolder-qualified
-includes and each `biquad_q14/*.c`/`*.h` file's bare sibling includes both
-resolve correctly compiled from `firmware/`'s own directory, exactly as
-`tests/test_firmware_package.py` and its generated `README.md` (§6 above)
-demonstrate.
+**Internal layout of `source/` (revised -- decision log entry 15):**
+`biquad_q14/` splits every filter *source* file across four subdirectories --
+`cfg/` (reserved for future user-config macros, currently always empty),
+`inc/` (both headers -- `biquad_q14.h` and the renamed `filter_design_calc.h`
+-- as bare sibling names), `src/` (`biquad_q14.c` and `filter_design_calc.c`),
+and `gen/` (the generated, per-design `filter_design.h`). `app_template/`
+(holding the generated `example.c`) is a **sibling** of `biquad_q14/`, not
+its parent -- unlike the old flat `firmware/` top level, where `example.c`
+sat directly alongside the `biquad_q14/` subfolder it reached via a
+subfolder-qualified include. Because `app_template/` and `biquad_q14/` are
+now both children of `source/`, `example.c`'s own `#include`s are bare names
+(`#include "filter_design_calc.h"`, `#include "biquad_q14.h"`) -- quoted-include
+same-directory resolution alone would not find them -- and compiling it
+requires an explicit `-I` flag pointed at `biquad_q14/inc`. The canonical
+compile command (used consistently in `source/README.md`, in the C validation
+step below, and in `tests/test_source_package.py`):
+
+```
+gcc -Wall -Wextra -Werror -std=c11 -I biquad_q14/inc app_template/example.c \
+    biquad_q14/src/biquad_q14.c biquad_q14/src/filter_design_calc.c -o demo -lm
+```
+
+(cwd = `source/`; pass absolute/relative paths from elsewhere as needed.)
+
+**C validation step (NEW -- decision log entry 15):** `export_design()`
+(`export.py`) calls a new `run_c_validation(snapshot, source_dir,
+reports_test_dir, backend)` after `render_source_package()` writes
+`source/`, which compiles and runs that *same, freshly-written* package (not
+a detached copy) with the canonical compile command above, then two
+cross-checks: (1) a **cascade check** -- run `app_template/example.c`'s
+compiled binary and compare its printed samples against
+`backend.process_samples(block.q14_coefficients, impulse)` chained
+stage-by-stage across `snapshot.blocks`, impulse = `[16384] + [0]*(N-1)`; (2)
+a **design-function check** -- a small generated harness calls each active
+block's own `filter_design_lp/hp/bp/ap/pk()` (its own exported params as
+literal float args, the same statement-builder `example.c` itself uses) and
+compares the printed Q14 coefficients directly against
+`snapshot.blocks[i].q14_coefficients` (already computed via the same
+`NativeBackend` at `build_snapshot()` time). The result -- an overall
+PASS/FAIL/SKIPPED verdict plus per-check detail (compiler stderr on a
+compile failure, the specific mismatched sample/coefficient on a numeric
+failure) -- is written to `reports/test/test_summary.txt`.
+
+This step is implemented as production code inside `export.py` rather than
+shelling out to `pytest` at runtime, deliberately: `tests/test_source_package.py`'s
+own proof already builds its fixture via `export_design()`, so invoking
+`pytest` from inside `export_design()` would recurse, and a packaged/installed
+build ships no `pytest` or `tests/`/`source/` tree to shell out to in the
+first place. It is also, by hard requirement, **never allowed to fail
+export**: matching this module's own "export is blocked only by invalid
+parameters" philosophy (§13) taken one step further, `run_c_validation()`
+catches gcc-missing (`FileNotFoundError`), any non-zero compile/run exit, a
+30s-compile/10s-run timeout, and any numeric mismatch, recording each as
+FAIL or SKIPPED in `test_summary.txt` instead of raising `ExportError` --
+and a last-resort catch-all around the whole step guards against a bug in
+the validation logic itself doing the same. `export_design()` still writes
+every other file even if this step finds real problems (or can't run at
+all, e.g. no `gcc` on `PATH`).
 
 ---
 
@@ -878,3 +948,41 @@ Added after v1's initial "no persistence" decision (§13) was reversed.
     layout change (§10): no file's *content* changed beyond `example.c`'s own
     `#include` paths gaining the `biquad_q14/` prefix they need to still find
     their headers.
+15. **Export directory restructured into `design.iirfilt` / `source/` / `reports/`
+    top-level groups; `source/`'s C package split into `cfg/inc/src/gen`; a real
+    compile-time C validation step added** (§10) -- the export directory's flat
+    file/PNG mix plus a `firmware/` subfolder is replaced by three clearly-scoped
+    top-level entries: `design.iirfilt` (the exported chain's own round-trip
+    project file, written via `project_file.save_project()` -- new; folding this
+    in means an export always round-trips to exactly what was shipped, independent
+    of whatever project file the user separately has open), `source/` (renamed
+    from `firmware/`; the complete, self-contained C deliverable), and `reports/`
+    (the PDF, now `biquad_q14_report.pdf`, plus `figures/` for every PNG and a new
+    `test/` for the C validation summary). Within `source/`, `biquad_q14/` is
+    split into `cfg/` (reserved, empty), `inc/` (headers), `src/` (implementation),
+    and `gen/` (the generated coefficient header -- now the *only* copy anywhere in
+    the export, replacing the old top-level/`firmware/` duplication), and
+    `app_template/` (holding the generated `example.c`) becomes a sibling of
+    `biquad_q14/` rather than sitting alongside it at a shared `firmware/` top
+    level with a subfolder-qualified include path -- `example.c`'s `#include`s are
+    now bare names, and compiling requires an explicit `-I biquad_q14/inc` flag
+    (the canonical compile command is documented once, in `export.py`'s module
+    docstring, `source/README.md`, and the C validation step, all consistently).
+    New: `export_design()` now also compiles and runs the just-written `source/`
+    package as a real, in-process production validation step
+    (`run_c_validation()`) -- a cascade compile+run cross-check against
+    `NativeBackend.process_samples()` and a design-function cross-check against
+    each block's own `snapshot.q14_coefficients` -- recording a PASS/FAIL/SKIPPED
+    verdict to `reports/test/test_summary.txt`. Implemented as production code
+    rather than shelling out to `pytest` at runtime (which would recurse, since
+    the dev-test proof for this same package already calls `export_design()`
+    itself, and would break in a packaged build with no `pytest`/`tests`/`source`
+    tree available) and, matching this module's own "export is blocked only by
+    invalid parameters" philosophy (§13) taken one step further, engineered to
+    NEVER fail or block export regardless of what it finds -- a missing compiler
+    or a real compile/run/mismatch failure is recorded in the summary, not raised.
+    Motivation throughout: organize the deliverable into clearly-scoped top-level
+    groups (what a human reads vs. what a firmware integrator compiles vs. the
+    round-trip project state), and replace an implicit "trust the generated files"
+    posture with a real, automated, non-blocking compile-time proof that ships
+    with every export.

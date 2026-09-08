@@ -21,8 +21,8 @@ An interactive desktop design suite for 2nd-order IIR filters (Butterworth LP/HP
 plus a parametric Peak/EQ type) targeting embedded Cortex-M4 devices. The user assembles
 a chain of filter blocks, inspects each filter's Bode diagram (ideal vs Q14 C
 implementation), and exports a self-contained deliverable (PDF report, C header, PNG
-plots, and a drop-in `firmware/` package) ready to drop into firmware. Chains can also be
-saved to and reloaded from a project file for later editing.
+plots, a project file, and a self-contained `source/` package) ready to drop into
+firmware. Chains can also be saved to and reloaded from a project file for later editing.
 
 ---
 
@@ -93,7 +93,7 @@ IIR-FilterDesignSuite/
 │   │   │   └── chain.py           FilterChain — ordered series cascade, shared fs
 │   │   ├── c_codegen.py           Compiles src/c/ → shared lib; exposes Q14 design fns (NativeBackend)
 │   │   ├── error_analysis.py      Error sweep: ideal vs Q14 across full fc range
-│   │   ├── export.py              PDF report + C header + PNGs + self-contained firmware/ package
+│   │   ├── export.py              PDF report + C header + PNGs + self-contained source/ package + C validation
 │   │   └── project_file.py        Save/load a chain to/from a versioned .iirfilt JSON file
 │   │
 │   ├── c/
@@ -113,7 +113,7 @@ IIR-FilterDesignSuite/
 │
 └── tests/                         pytest suite: per-filter-type math (test_lowpass.py, ...,
                                    test_peak.py), native Q14 ABI/coefficient/impulse/
-                                   saturation tests, export + firmware-package round trips,
+                                   saturation tests, export + source-package round trips,
                                    project-file round trips, and offscreen UI smoke tests
                                    (see README.md §5 for how to run them)
 ```
@@ -280,20 +280,34 @@ Produces a timestamped output folder:
 
 ```
 export_YYYYMMDD_HHMMSS/
-├── report.pdf          Full report (see below)
-├── filter_design.h     C header with Q14 coefficients for all blocks
-├── bode_combined.png   Combined chain Bode plot
-├── bode_<type>_<n>.png Individual Bode plot per block
-├── error_sweep_<n>.png Error-vs-fc sweep plot per block
-└── firmware/           Self-contained drop-in package (see below)
+├── design.iirfilt              Current chain config (project_file.save_project())
+├── source/                     Self-contained C deliverable (see below)
+│   ├── biquad_q14/
+│   │   ├── cfg/                 Reserved for future user-config macros (empty)
+│   │   ├── inc/                 biquad_q14.h, filter_design_calc.h
+│   │   ├── src/                 biquad_q14.c, filter_design_calc.c
+│   │   └── gen/filter_design.h  GENERATED per-design Q14 coefficients
+│   ├── app_template/example.c  Generated cascade-wiring demo
+│   └── README.md                Integration instructions
+└── reports/
+    ├── biquad_q14_report.pdf   Full report (see below)
+    ├── figures/
+    │   ├── bode_combined.png    Combined chain Bode plot
+    │   ├── bode_<type>_<n>.png  Individual Bode plot per block
+    │   └── error_sweep_<n>.png Error-vs-fc sweep plot per block
+    └── test/test_summary.txt   C compile+run validation result (see below)
 ```
+
+`design.iirfilt` is a fixed filename every time, independent of whatever
+project file the user separately has open/saved via File ▸ Save — so this
+export directory round-trips to exactly the chain state that was exported.
 
 ### PDF report contents
 
 1. **Design summary** — fs, filter chain diagram, topology
 2. **Per-filter section** — Bode plot, coefficient table (ideal + Q14), error sweep summary
 3. **Combined chain** — combined Bode (ideal + Q14 cascade)
-4. **C header listing** — inline copy of `filter_design.h`
+4. **C header listing** — inline copy of the generated `filter_design.h`
 5. **Test results** — pass/fail per block (max error < 0.1 dB threshold)
 
 ### C header format
@@ -317,17 +331,27 @@ standalone without the firmware consumer having to define anything first
 #define FILT1_A2  9695    // 0.59158379f
 ```
 
-### The `firmware/` package
+### The `source/` package
 
-Every export also writes a `firmware/` subfolder — a complete, self-contained
-drop-in package for an external firmware project, needing no other file from
-this repository: the same `filter_design.h` and a generated `example.c`
-wiring the exported chain's blocks in series sit at `firmware/`'s own top
-level, alongside a `README.md` with integration instructions; every actual
-filter source file — the standalone `biquad_q14.h`/`.c` pair and the
-Q14 design-function implementation — is nested under `firmware/biquad_q14/`.
-See README.md §6 for details and how it's verified to actually compile and
-run standalone.
+Every export also writes a `source/` subfolder — a complete, self-contained
+C deliverable for an external firmware project, needing no other file from
+this repository: `biquad_q14/` groups every filter source file into `cfg/`
+(reserved, empty), `inc/` (headers), `src/` (implementation), and `gen/`
+(the generated, per-design coefficient header); a sibling `app_template/`
+holds a generated `example.c` wiring the exported chain's blocks in series,
+and a `README.md` carries integration instructions, including the canonical
+compile command (`-I biquad_q14/inc` is required since `app_template/` is a
+sibling of `biquad_q14/`, not its parent). See README.md §6 for details.
+
+### C validation (`reports/test/test_summary.txt`)
+
+Every export also compiles and runs the just-written `source/` package
+(with the same `gcc` used for the native backend) and cross-checks its
+output against this export's own snapshot data — a cascade compile+run
+check and a design-function check, both recorded as a PASS/FAIL/SKIPPED
+verdict in `reports/test/test_summary.txt`. This step never blocks or fails
+export itself (a missing compiler, or a compile/run/mismatch failure, is
+recorded in the summary, not raised) — see CONTRACTS.md §10.
 
 ---
 
@@ -345,7 +369,7 @@ run standalone.
 | Chain topology | Series only | Parallel (summing) is out of scope for v1 |
 | Validation | Fully automatic, no "Validate" action | Every parameter/chain edit recomputes response error and coefficient-sweep metrics immediately |
 | Persistence | Save/Open a versioned `.iirfilt` JSON project file | Reverses the original "no save/load in v1" decision; round-trips the full chain (including invalid/disabled blocks) |
-| Export | PDF + C header + PNGs + self-contained `firmware/` package | PDF for documentation, header for firmware, PNGs for datasheets, `firmware/` for a zero-dependency drop-in |
+| Export | PDF + C header + PNGs + project file + self-contained `source/` package + C validation | PDF for documentation, header for firmware, PNGs for datasheets, `source/` for a zero-dependency drop-in, `design.iirfilt` so the export round-trips, a compile+run check for real confidence |
 | Compilation | Runtime ctypes (subprocess gcc) | Same pattern as IIR-Compare; no build system needed |
 
 ---
@@ -385,7 +409,7 @@ cut (§8, §10) — see CONTRACTS.md §13/§15 for the format and UI rules.
 | Milestone | Deliverable |
 |-----------|-------------|
 | Int16 Q14 storage | Coefficients/state narrowed from `int32_t` to `int16_t`, saturating 32-bit accumulator (CONTRACTS.md §7) |
-| Firmware package export | Self-contained `firmware/` subfolder per export, proven to compile/run standalone (`tests/test_firmware_package.py`) |
+| Source package export | Self-contained `source/` subfolder per export, proven to compile/run standalone (`tests/test_source_package.py`), plus a production C validation step recorded in `reports/test/test_summary.txt` |
 | Project save/load | Versioned `.iirfilt` JSON round-trip (`project_file.py`, `tests/test_project_file.py`) |
 | Fixed Bode y-axes | Phase locked to ±180°, magnitude floor locked to −100 dB, in both the GUI and exported plots |
 | File/Edit menu bar | Replaced the original toolbar sketch; Open/Save/Save As/Export under File, Clear/Reset under Edit |

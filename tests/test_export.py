@@ -3,7 +3,9 @@
 Uses the session-scoped `native_backend` fixture from conftest.py (a real
 ctypes-backed NativeBackend) since header/PDF content depends on real Q14
 quantization, not a stand-in. `gcc` is required on PATH for the header
-compilation test, matching the rest of this suite's native-backend tests.
+compilation test and the C validation step, matching the rest of this
+suite's native-backend tests (no skip-if-missing-gcc logic -- see README's
+"Native tests need a working compiler on PATH").
 """
 
 from __future__ import annotations
@@ -17,11 +19,12 @@ import pytest
 
 from error_analysis import COEFFICIENT_SWEEP_N
 from export import (
+    BIQUAD_DIRNAME,
     C_SRC_DIR,
     FILTER_KIND_NAMES,
-    FIRMWARE_FILTER_SOURCES_DIRNAME,
     MAGNITUDE_YLIM_FLOOR,
     MAGNITUDE_YLIM_STEP,
+    PROJECT_FILENAME,
     ExportError,
     _adaptive_magnitude_ylim,
     _sweep_design_at,
@@ -31,6 +34,7 @@ from export import (
 )
 from filters import FilterChain
 from filters.base import fc_max
+from project_file import load_project
 
 FS = 13333.0
 FIXED_NOW = datetime(2026, 8, 18, 10, 30, 0, tzinfo=timezone(timedelta(hours=2)))
@@ -55,10 +59,25 @@ def test_export_produces_complete_file_set(tmp_path, native_backend):
     assert result.output_dir.parent == tmp_path
     assert result.output_dir.name == "export_20260818_103000"
 
-    names = {p.name for p in result.output_dir.iterdir()}
-    assert names == {
-        "report.pdf",
-        "filter_design.h",
+    top_names = {p.name for p in result.output_dir.iterdir()}
+    assert top_names == {"design.iirfilt", "source", "reports"}
+
+    source_names = {p.name for p in result.source_dir.iterdir()}
+    assert source_names == {"biquad_q14", "app_template", "README.md"}
+
+    biquad_dir = result.source_dir / BIQUAD_DIRNAME
+    assert {p.name for p in biquad_dir.iterdir()} == {"cfg", "inc", "src", "gen"}
+    assert list((biquad_dir / "cfg").iterdir()) == []  # reserved, always empty
+    assert {p.name for p in (biquad_dir / "inc").iterdir()} == {"biquad_q14.h", "filter_design_calc.h"}
+    assert {p.name for p in (biquad_dir / "src").iterdir()} == {"biquad_q14.c", "filter_design_calc.c"}
+    assert {p.name for p in (biquad_dir / "gen").iterdir()} == {"filter_design.h"}
+    assert {p.name for p in (result.source_dir / "app_template").iterdir()} == {"example.c"}
+
+    reports_names = {p.name for p in result.reports_dir.iterdir()}
+    assert reports_names == {"biquad_q14_report.pdf", "figures", "test"}
+
+    figures_dir = result.reports_dir / "figures"
+    assert {p.name for p in figures_dir.iterdir()} == {
         "bode_combined.png",
         "bode_lp_1.png",
         "bode_hp_2.png",
@@ -68,8 +87,10 @@ def test_export_produces_complete_file_set(tmp_path, native_backend):
         "error_sweep_2.png",
         "error_sweep_3.png",  # BP now has a coefficient sweep too (CONTRACTS.md §6.3)
         "error_sweep_4.png",
-        "firmware",  # drop-in C package subfolder -- see test_firmware_package.py
     }
+
+    test_dir = result.reports_dir / "test"
+    assert {p.name for p in test_dir.iterdir()} == {"test_summary.txt"}
 
 
 def test_export_creates_timestamped_directory_and_handles_collision(tmp_path, native_backend):
@@ -273,7 +294,7 @@ def test_generated_header_compiles_with_gcc(tmp_path, native_backend):
         "}\n"
     )
     proc = subprocess.run(
-        ["gcc", "-Wall", "-Wextra", "-Werror", "-std=c11", "-I", str(result.output_dir), "-c", str(stub), "-o", str(tmp_path / "stub.o")],
+        ["gcc", "-Wall", "-Wextra", "-Werror", "-std=c11", "-I", str(result.header_path.parent), "-c", str(stub), "-o", str(tmp_path / "stub.o")],
         capture_output=True,
         text=True,
         timeout=30,
@@ -545,12 +566,13 @@ def test_disabled_block_excluded_from_pngs_and_file_set(tmp_path, native_backend
 
     result = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
 
-    names = {p.name for p in result.output_dir.iterdir()}
-    assert "bode_hp_2.png" not in names
+    top_names = {p.name for p in result.output_dir.iterdir()}
+    assert top_names == {"design.iirfilt", "source", "reports"}
+
+    figure_names = {p.name for p in (result.reports_dir / "figures").iterdir()}
+    assert "bode_hp_2.png" not in figure_names
     # LP/BP/AP renumbered contiguously over the 3 remaining active blocks.
-    assert names == {
-        "report.pdf",
-        "filter_design.h",
+    assert figure_names == {
         "bode_combined.png",
         "bode_lp_1.png",
         "bode_bp_2.png",
@@ -558,7 +580,6 @@ def test_disabled_block_excluded_from_pngs_and_file_set(tmp_path, native_backend
         "error_sweep_1.png",
         "error_sweep_2.png",
         "error_sweep_3.png",
-        "firmware",
     }
 
 
@@ -833,99 +854,91 @@ def test_png_write_failure_raises_export_error_directly(tmp_path, native_backend
         _save_bode_png(bad_path, ideal, q14, "title")
 
 
-# --- firmware/ drop-in package (CONTRACTS.md §10) -------------------------------------
+# --- source/ package (CONTRACTS.md §10) -------------------------------------
 
 
-def test_firmware_subfolder_contains_expected_files(tmp_path, native_backend):
+def test_source_package_contains_expected_files(tmp_path, native_backend):
     result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
 
-    assert result.firmware_dir == result.output_dir / "firmware"
-    # Top level: only the two files an integrator actually names/reads, plus
-    # the README -- every filter *source* file is nested under biquad_q14/.
-    names = {p.name for p in result.firmware_dir.iterdir()}
-    assert names == {
-        "filter_design.h",
-        "example.c",
-        "README.md",
-        FIRMWARE_FILTER_SOURCES_DIRNAME,
-    }
+    assert result.source_dir == result.output_dir / "source"
+    names = {p.name for p in result.source_dir.iterdir()}
+    assert names == {"README.md", BIQUAD_DIRNAME, "app_template"}
 
-    sources_dir = result.firmware_dir / FIRMWARE_FILTER_SOURCES_DIRNAME
-    assert sources_dir.is_dir()
-    source_names = {p.name for p in sources_dir.iterdir()}
-    assert source_names == {
-        "filter_design_calc.h",
-        "filter_design_calc.c",
-        "biquad_q14.h",
-        "biquad_q14.c",
-    }
+    biquad_dir = result.source_dir / BIQUAD_DIRNAME
+    assert biquad_dir.is_dir()
+    assert {p.name for p in biquad_dir.iterdir()} == {"cfg", "inc", "src", "gen"}
+    assert list((biquad_dir / "cfg").iterdir()) == []  # reserved for future macros, always empty
+
+    inc_names = {p.name for p in (biquad_dir / "inc").iterdir()}
+    assert inc_names == {"biquad_q14.h", "filter_design_calc.h"}
+
+    src_names = {p.name for p in (biquad_dir / "src").iterdir()}
+    assert src_names == {"biquad_q14.c", "filter_design_calc.c"}
+
+    gen_names = {p.name for p in (biquad_dir / "gen").iterdir()}
+    assert gen_names == {"filter_design.h"}
+
+    app_template_dir = result.source_dir / "app_template"
+    assert {p.name for p in app_template_dir.iterdir()} == {"example.c"}
 
 
-def test_firmware_biquad_c_is_byte_identical_to_src_c(tmp_path, native_backend):
+def test_source_package_biquad_c_is_byte_identical_to_src_c(tmp_path, native_backend):
     """The DSP logic is copied verbatim, never hand-duplicated -- a Feature-A-style
     change to src/c/biquad_q14.c must propagate to the next export automatically."""
     result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
 
-    bundled = result.firmware_dir / FIRMWARE_FILTER_SOURCES_DIRNAME / "biquad_q14.c"
+    bundled = result.source_dir / BIQUAD_DIRNAME / "src" / "biquad_q14.c"
     assert bundled.read_bytes() == (C_SRC_DIR / "biquad_q14.c").read_bytes()
 
 
-def test_firmware_design_calc_header_is_byte_identical_to_src_c(tmp_path, native_backend):
+def test_source_package_design_calc_header_is_byte_identical_to_src_c(tmp_path, native_backend):
     """filter_design_calc.h has no #include of its own, so unlike the paired
     .c file it needs no rewrite -- a pure verbatim copy of src/c/filter_design.h."""
     result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
 
-    bundled = result.firmware_dir / FIRMWARE_FILTER_SOURCES_DIRNAME / "filter_design_calc.h"
+    bundled = result.source_dir / BIQUAD_DIRNAME / "inc" / "filter_design_calc.h"
     assert bundled.read_bytes() == (C_SRC_DIR / "filter_design.h").read_bytes()
 
 
-def test_firmware_design_calc_source_matches_src_c_except_include(tmp_path, native_backend):
+def test_source_package_design_calc_source_matches_src_c_except_include(tmp_path, native_backend):
     """filter_design_calc.c is a verbatim copy of src/c/filter_design.c except
     its own #include line is repointed at the renamed header -- never
     hand-duplicated design math."""
     result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
 
     original = (C_SRC_DIR / "filter_design.c").read_text(encoding="utf-8")
-    bundled = (result.firmware_dir / FIRMWARE_FILTER_SOURCES_DIRNAME / "filter_design_calc.c").read_text(
-        encoding="utf-8"
-    )
+    bundled = (result.source_dir / BIQUAD_DIRNAME / "src" / "filter_design_calc.c").read_text(encoding="utf-8")
     assert bundled == original.replace('#include "filter_design.h"', '#include "filter_design_calc.h"', 1)
 
 
-def test_firmware_header_has_no_filter_design_include_and_defines_q14_coeffs(tmp_path, native_backend):
+def test_source_package_biquad_header_has_no_filter_design_include_and_defines_q14_coeffs(tmp_path, native_backend):
     result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
 
-    text = (result.firmware_dir / FIRMWARE_FILTER_SOURCES_DIRNAME / "biquad_q14.h").read_text(encoding="utf-8")
+    text = (result.source_dir / BIQUAD_DIRNAME / "inc" / "biquad_q14.h").read_text(encoding="utf-8")
     assert '#include "filter_design.h"' not in text
     assert '#include "filter_design_calc.h"' in text
 
 
-def test_firmware_example_includes_point_into_sources_subfolder(tmp_path, native_backend):
-    """example.c sits at firmware/'s top level while the headers it needs
-    live under biquad_q14/, so its own #includes must be subfolder-qualified
-    (CONTRACTS.md §10's firmware/ layout)."""
+def test_app_template_example_includes_are_bare_names(tmp_path, native_backend):
+    """example.c sits under app_template/, a SIBLING of biquad_q14/ (not its
+    parent), so its own #includes must be bare names, not subfolder-qualified
+    -- compiling it requires an explicit -I biquad_q14/inc flag instead."""
     result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
 
-    text = (result.firmware_dir / "example.c").read_text(encoding="utf-8")
-    assert f'#include "{FIRMWARE_FILTER_SOURCES_DIRNAME}/filter_design_calc.h"' in text
-    assert f'#include "{FIRMWARE_FILTER_SOURCES_DIRNAME}/biquad_q14.h"' in text
+    text = (result.source_dir / "app_template" / "example.c").read_text(encoding="utf-8")
+    assert '#include "filter_design_calc.h"' in text
+    assert '#include "biquad_q14.h"' in text
+    assert "biquad_q14/filter_design_calc.h" not in text
+    assert "biquad_q14/biquad_q14.h" not in text
 
 
-def test_firmware_filter_design_h_matches_top_level_content(tmp_path, native_backend):
-    result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
-
-    top_level = (result.output_dir / "filter_design.h").read_bytes()
-    firmware = (result.firmware_dir / "filter_design.h").read_bytes()
-    assert top_level == firmware
-
-
-def test_firmware_example_declares_one_state_per_active_block(tmp_path, native_backend):
+def test_app_template_example_declares_one_state_per_active_block(tmp_path, native_backend):
     chain = _chain_lp_hp_bp_ap()
     hp_id = chain.blocks[1].id
     chain.set_enabled(hp_id, False)  # LP, BP, AP remain active -> renumbered FILT1/2/3
 
     result = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
-    text = (result.firmware_dir / "example.c").read_text(encoding="utf-8")
+    text = (result.source_dir / "app_template" / "example.c").read_text(encoding="utf-8")
 
     assert text.count("static biquad_q14_state_t state") == 3
     assert "state1" in text and "state2" in text and "state3" in text
@@ -933,7 +946,7 @@ def test_firmware_example_declares_one_state_per_active_block(tmp_path, native_b
     assert text.count("biquad_q14_process(&state") == 3
 
 
-def test_firmware_example_computes_coefficients_via_design_functions(tmp_path, native_backend):
+def test_app_template_example_computes_coefficients_via_design_functions(tmp_path, native_backend):
     """example.c must call this design's own filter_design_lp/hp/bp/ap/pk()
     at runtime to obtain each stage's coefficients (CONTRACTS.md §10) --
     never read the frozen FILT<n>_* defines directly, and never hand-compute
@@ -941,12 +954,47 @@ def test_firmware_example_computes_coefficients_via_design_functions(tmp_path, n
     chain = _chain_lp_hp_bp_ap()  # LP fc=3000, HP fc=1000, BP f_low=2000/f_high=4000, AP fc=2000 Q=1.0
     chain.add_block("PK", fc=2500.0, Q=1.0, gain_db=6.0)
     result = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
-    text = (result.firmware_dir / "example.c").read_text(encoding="utf-8")
+    text = (result.source_dir / "app_template" / "example.c").read_text(encoding="utf-8")
 
     assert not re.search(r"FILT\d+_", text)  # no frozen-define usage (banner comment may still mention them)
-    assert f'#include "{FIRMWARE_FILTER_SOURCES_DIRNAME}/filter_design_calc.h"' in text
+    assert '#include "filter_design_calc.h"' in text
     assert re.search(r"filter_design_lp\(\s*3000\.0\s*,\s*13333\.0\s*,\s*&coeffs1\s*\);", text)
     assert re.search(r"filter_design_hp\(\s*1000\.0\s*,\s*13333\.0\s*,\s*&coeffs2\s*\);", text)
     assert re.search(r"filter_design_bp\(\s*2000\.0\s*,\s*4000\.0\s*,\s*13333\.0\s*,\s*&coeffs3\s*\);", text)
     assert re.search(r"filter_design_ap\(\s*2000\.0\s*,\s*13333\.0\s*,\s*1\.0\s*,\s*&coeffs4\s*\);", text)
     assert re.search(r"filter_design_pk\(\s*2500\.0\s*,\s*13333\.0\s*,\s*1\.0\s*,\s*6\.0\s*,\s*&coeffs5\s*\);", text)
+
+
+# --- design.iirfilt project file (round-trips the exported chain) -----------------
+
+
+def test_export_writes_project_file_that_round_trips_exact_chain_state(tmp_path, native_backend):
+    chain = _chain_lp_hp_bp_ap()
+    bad_id = chain.add_block("LP", fc=999_999.0)  # invalid
+    chain.set_enabled(bad_id, False)  # a bypass, so it doesn't block export
+
+    result = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+
+    assert result.project_file_path == result.output_dir / PROJECT_FILENAME
+    assert result.project_file_path.is_file()
+
+    fs, blocks = load_project(result.project_file_path)
+    assert fs == chain.fs
+    assert [ (b["kind"], b["params"], b["enabled"]) for b in blocks ] == [
+        (b.kind, dict(b.params), b.enabled) for b in chain.blocks
+    ]
+
+
+# --- reports/test/test_summary.txt (C validation step) ----------------------------
+
+
+def test_c_validation_summary_written_with_pass_verdict(tmp_path, native_backend):
+    result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
+
+    assert result.test_summary_path == result.reports_dir / "test" / "test_summary.txt"
+    assert result.test_summary_path.is_file()
+
+    text = result.test_summary_path.read_text(encoding="utf-8")
+    assert "Overall: PASS" in text
+    assert "Cascade compile+run check: PASS" in text
+    assert "Design-function check: PASS" in text
