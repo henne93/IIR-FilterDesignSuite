@@ -6,8 +6,12 @@ per-block tabs), a signal block has no dedicated per-block Inspector tab --
 its parameters are edited directly on this canvas tile via inline fields.
 
 Ownership rule (mirrors filter_block.py): this widget never mutates
-`SignalChain` directly. It only emits `params_edited`/`delete_requested`;
-`SignalCanvas` is the one that calls into the model and re-renders.
+`SignalChain` directly. It only emits `params_edited`/`delete_requested`/
+`reseed_requested`; `SignalCanvas` is the one that calls into the model and
+re-renders. `reseed_requested` (NOISE blocks only) draws a fresh random
+seed via `SignalChain.reseed()` -- the one explicit, user-triggered way to
+change a seed that otherwise stays fixed across unrelated edits (see
+`signals/noise.py`).
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ _ACTION_BUTTON_SIZE = QSize(20, 20)
 class SignalBlockWidget(QFrame):
     params_edited = pyqtSignal(str, dict)  # block_id, {param: value} (value: float | str)
     delete_requested = pyqtSignal(str)  # block_id
+    reseed_requested = pyqtSignal(str)  # block_id (NOISE blocks only)
 
     def __init__(self, block: SignalChainBlock, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -93,6 +98,14 @@ class SignalBlockWidget(QFrame):
             self._fields["value"] = self._add_field(form, "value", "value", block.params["value"])
         elif kind == "NOISE":
             self._fields["amplitude"] = self._add_field(form, "amplitude", "amplitude", block.params["amplitude"])
+            self.seed_label = QLabel(str(block.params.get("seed", "")))
+            self.seed_label.setObjectName("signalBlockSeed")
+            form.addRow("seed", self.seed_label)
+            reseed_button = QPushButton("Reseed")
+            reseed_button.setObjectName("reseedButton")
+            reseed_button.setToolTip("Draw a new random seed for this block")
+            reseed_button.clicked.connect(lambda: self.reseed_requested.emit(self.block_id))
+            form.addRow("", reseed_button)
         elif kind == "CSV":
             file_path = str(block.params.get("file_path", ""))
             self.file_label = QLabel(Path(file_path).name if file_path else "(no file)")

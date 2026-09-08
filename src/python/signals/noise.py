@@ -17,7 +17,9 @@ class NoiseSignal(SignalDesign):
     duration edits, ...) and only changes if this block's own params are
     edited. This is a deliberate choice -- confirmed with the user -- over
     freshly-drawn noise on every redraw, which would make the plot jitter
-    on every unrelated UI update.
+    on every unrelated UI update. `SignalChain.reseed()` (wired to the
+    Noise tile's "Reseed" button, `ui/widgets/signal_block.py`) is the one
+    explicit, user-triggered way to change it.
     """
 
     kind = "NOISE"

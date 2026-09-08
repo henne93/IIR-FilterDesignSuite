@@ -35,6 +35,8 @@ from export import (
 from filters import FilterChain
 from filters.base import fc_max
 from project_file import load_project
+from signals import SignalChain
+from time_domain import n_samples_for
 
 FS = 13333.0
 FIXED_NOW = datetime(2026, 8, 18, 10, 30, 0, tzinfo=timezone(timedelta(hours=2)))
@@ -47,6 +49,12 @@ def _chain_lp_hp_bp_ap(fs: float = FS) -> FilterChain:
     chain.add_block("BP", f_low=2000.0, f_high=4000.0)
     chain.add_block("AP", fc=2000.0, Q=1.0)
     return chain
+
+
+def _signal_chain_sine() -> SignalChain:
+    signal_chain = SignalChain()
+    signal_chain.add_block("SIN", frequency=1000.0, amplitude=0.5, phase_deg=0.0)
+    return signal_chain
 
 
 # --- complete export file set -------------------------------------------------
@@ -978,11 +986,12 @@ def test_export_writes_project_file_that_round_trips_exact_chain_state(tmp_path,
     assert result.project_file_path == result.output_dir / PROJECT_FILENAME
     assert result.project_file_path.is_file()
 
-    fs, blocks = load_project(result.project_file_path)
+    fs, blocks, signal_blocks = load_project(result.project_file_path)
     assert fs == chain.fs
     assert [ (b["kind"], b["params"], b["enabled"]) for b in blocks ] == [
         (b.kind, dict(b.params), b.enabled) for b in chain.blocks
     ]
+    assert signal_blocks == []  # no signal_chain passed to export_design() here
 
 
 # --- reports/test/test_summary.txt (C validation step) ----------------------------
@@ -998,3 +1007,196 @@ def test_c_validation_summary_written_with_pass_verdict(tmp_path, native_backend
     assert "Overall: PASS" in text
     assert "Cascade compile+run check: PASS" in text
     assert "Design-function check: PASS" in text
+
+
+# --- time-domain export artifacts (CONCEPT.md §11, CONTRACTS.md §10 addendum) ----
+
+
+def test_time_domain_artifacts_omitted_without_signal_chain(tmp_path, native_backend):
+    result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
+
+    figure_names = {p.name for p in (result.reports_dir / "figures").iterdir()}
+    assert not any(name.startswith("time_domain_") for name in figure_names)
+    assert not (result.reports_dir / "data").exists()
+    assert result.time_domain_combined_png is None
+    assert result.time_domain_combined_csv is None
+    assert result.time_domain_block_pngs == {}
+    assert result.time_domain_block_csvs == {}
+
+
+def test_time_domain_artifacts_produced_with_signal_chain(tmp_path, native_backend):
+    chain = _chain_lp_hp_bp_ap()
+    signal_chain = _signal_chain_sine()
+
+    result = export_design(
+        chain,
+        native_backend,
+        tmp_path,
+        now=FIXED_NOW,
+        signal_chain=signal_chain,
+        time_domain_duration_ms=10.0,
+        time_domain_full_scale=32767,
+    )
+
+    figure_names = {p.name for p in (result.reports_dir / "figures").iterdir()}
+    assert "time_domain_combined.png" in figure_names
+    assert figure_names >= {
+        "time_domain_lp_1.png",
+        "time_domain_hp_2.png",
+        "time_domain_bp_3.png",
+        "time_domain_ap_4.png",
+    }
+
+    data_names = {p.name for p in (result.reports_dir / "data").iterdir()}
+    assert data_names == {
+        "time_domain_combined.csv",
+        "time_domain_lp_1.csv",
+        "time_domain_hp_2.csv",
+        "time_domain_bp_3.csv",
+        "time_domain_ap_4.csv",
+    }
+
+    assert result.time_domain_combined_png == result.reports_dir / "figures" / "time_domain_combined.png"
+    assert result.time_domain_combined_png.read_bytes().startswith(b"\x89PNG")
+    assert result.time_domain_block_pngs[1] == result.reports_dir / "figures" / "time_domain_lp_1.png"
+    assert result.time_domain_combined_csv == result.reports_dir / "data" / "time_domain_combined.csv"
+    assert result.time_domain_block_csvs[1] == result.reports_dir / "data" / "time_domain_lp_1.csv"
+
+
+def test_time_domain_csv_has_header_and_expected_row_count(tmp_path, native_backend):
+    chain = _chain_lp_hp_bp_ap()
+    duration_ms = 5.0
+
+    result = export_design(
+        chain,
+        native_backend,
+        tmp_path,
+        now=FIXED_NOW,
+        signal_chain=_signal_chain_sine(),
+        time_domain_duration_ms=duration_ms,
+        time_domain_full_scale=32767,
+    )
+
+    text = result.time_domain_combined_csv.read_text(encoding="utf-8")
+    assert text.endswith("\n") and not text.endswith("\n\n")
+    lines = text.splitlines()
+    assert lines[0] == "time_ms,source,ideal,q14"
+    assert len(lines) - 1 == n_samples_for(duration_ms, chain.fs)
+    first_row = lines[1].split(",")
+    assert len(first_row) == 4
+    assert float(first_row[0]) == pytest.approx(0.0)
+
+
+def test_time_domain_artifacts_omitted_for_empty_signal_chain(tmp_path, native_backend):
+    result = export_design(
+        _chain_lp_hp_bp_ap(),
+        native_backend,
+        tmp_path,
+        now=FIXED_NOW,
+        signal_chain=SignalChain(),
+        time_domain_duration_ms=10.0,
+        time_domain_full_scale=32767,
+    )
+
+    assert result.time_domain_combined_png is None
+    assert not (result.reports_dir / "data").exists()
+    assert result.pdf_path.is_file()  # rest of the export is unaffected
+
+
+def test_time_domain_artifacts_omitted_for_fully_invalid_signal_chain(tmp_path, native_backend):
+    signal_chain = SignalChain()
+    signal_chain.add_block("CSV", file_path="")  # invalid: no file given
+    assert signal_chain.valid_blocks == []
+
+    result = export_design(
+        _chain_lp_hp_bp_ap(),
+        native_backend,
+        tmp_path,
+        now=FIXED_NOW,
+        signal_chain=signal_chain,
+        time_domain_duration_ms=10.0,
+        time_domain_full_scale=32767,
+    )
+
+    assert result.time_domain_combined_png is None
+    assert not (result.reports_dir / "data").exists()
+
+
+@pytest.mark.parametrize("duration_ms,full_scale", [(None, 32767), (10.0, None), (0.0, 32767), (-5.0, 32767)])
+def test_time_domain_artifacts_omitted_for_missing_or_invalid_duration_or_full_scale(
+    tmp_path, native_backend, duration_ms, full_scale
+):
+    result = export_design(
+        _chain_lp_hp_bp_ap(),
+        native_backend,
+        tmp_path,
+        now=FIXED_NOW,
+        signal_chain=_signal_chain_sine(),
+        time_domain_duration_ms=duration_ms,
+        time_domain_full_scale=full_scale,
+    )
+
+    assert result.time_domain_combined_png is None
+    assert not (result.reports_dir / "data").exists()
+
+
+def test_export_writes_project_file_including_signal_chain_when_given(tmp_path, native_backend):
+    chain = _chain_lp_hp_bp_ap()
+    signal_chain = _signal_chain_sine()
+    noise_id = signal_chain.add_block("NOISE", amplitude=0.1, seed=42)
+
+    result = export_design(
+        chain,
+        native_backend,
+        tmp_path,
+        now=FIXED_NOW,
+        signal_chain=signal_chain,
+        time_domain_duration_ms=10.0,
+        time_domain_full_scale=32767,
+    )
+
+    _, _, signal_blocks = load_project(result.project_file_path)
+    assert [(b["kind"], b["params"], b["factor"]) for b in signal_blocks] == [
+        (b.kind, dict(b.params), b.factor) for b in signal_chain.blocks
+    ]
+    assert signal_chain.get_block(noise_id).params["seed"] == 42
+
+
+def test_time_domain_section_appears_in_pdf_story_when_signal_chain_given(tmp_path, native_backend, monkeypatch):
+    from export import Paragraph as _RealParagraph
+
+    captured: list[str] = []
+
+    def fake_paragraph(text, style):
+        captured.append(text)
+        return _RealParagraph(text, style)
+
+    monkeypatch.setattr("export.Paragraph", fake_paragraph)
+
+    export_design(
+        _chain_lp_hp_bp_ap(),
+        native_backend,
+        tmp_path,
+        now=FIXED_NOW,
+        signal_chain=_signal_chain_sine(),
+        time_domain_duration_ms=10.0,
+        time_domain_full_scale=32767,
+    )
+
+    assert captured.count("Time domain") == 5  # 4 active blocks + combined section
+
+
+def test_time_domain_section_absent_from_pdf_story_without_signal_chain(tmp_path, native_backend, monkeypatch):
+    from export import Paragraph as _RealParagraph
+
+    captured: list[str] = []
+
+    def fake_paragraph(text, style):
+        captured.append(text)
+        return _RealParagraph(text, style)
+
+    monkeypatch.setattr("export.Paragraph", fake_paragraph)
+
+    export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
+
+    assert "Time domain" not in captured

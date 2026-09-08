@@ -439,7 +439,7 @@ matter for a sum):
 |-------|-----------|-------|
 | **Sine** | frequency [Hz], amplitude, phase | Amplitude is normalized (§11.4) |
 | **DC** | value | Constant offset, tests DC handling |
-| **Noise** | amplitude (AWGN, additive white Gaussian) | Just another block — no special "clean vs. noisy" distinction; see below |
+| **Noise** | amplitude (AWGN, additive white Gaussian) | Just another block — no special "clean vs. noisy" distinction; see below. Its random seed is fixed at creation (stable across unrelated edits/reloads) and only changes via an explicit **Reseed** button on the block tile |
 | **CSV Import** | file (time [s], value columns) | Resampled to the global `fs` (§11.3); raw file values are not assumed pre-normalized, hence the `factor` below |
 
 Every block, regardless of type, additionally has a **`factor`** parameter
@@ -570,8 +570,13 @@ existing 3-panel Design layout. The Time-Domain view **mirrors the existing
 
 - Real-time / streaming audio playback of source or filtered signal
 - Per-sample interactive scrubbing beyond the existing hover-cursor pattern
-- Exporting time-domain plots/data as part of File ▸ Export (may follow
-  later, not part of this iteration)
-- Noise/signal-block parameters participating in the `.iirfilt` project file
-  (persistence of the signal chain) — TBD, likely a later iteration once the
-  core view works
+
+**No longer out of scope:**
+
+- Signal-chain persistence in the `.iirfilt` project file shipped after this
+  iteration's initial exclusion — see CONTRACTS.md §15 (schema version 2).
+- Exporting time-domain plots/data as part of File ▸ Export also shipped,
+  reversing this section's original exclusion — see CONTRACTS.md §10's
+  "Time-domain export artifacts" addendum: a combined + per-filter-block PNG
+  and CSV pair, produced only when the Time-Domain view's signal chain has
+  at least one valid block, plus a corresponding PDF section per block.

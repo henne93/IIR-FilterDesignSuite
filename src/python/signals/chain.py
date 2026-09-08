@@ -91,6 +91,7 @@ class SignalChain:
     def __init__(self) -> None:
         self._blocks: list[SignalChainBlock] = []
         self._next_id = itertools.count(1)
+        self.dirty: bool = False
 
     @property
     def blocks(self) -> list[SignalChainBlock]:
@@ -131,11 +132,13 @@ class SignalChain:
             resolved["seed"] = int(np.random.default_rng().integers(0, 2**31 - 1))
         block_id = f"sig{next(self._next_id)}"
         self._blocks.append(_make_block(block_id, kind, resolved, float(factor)))
+        self.dirty = True
         return block_id
 
     def remove_block(self, block_id: str) -> None:
         idx = self._index_of(block_id)
         del self._blocks[idx]
+        self.dirty = True
 
     def update_params(self, block_id: str, **params: float | str) -> None:
         """Merges `params` into the block's current params and re-validates.
@@ -149,15 +152,39 @@ class SignalChain:
         merged = dict(old.params)
         merged.update(params)
         self._blocks[idx] = _make_block(old.id, old.kind, merged, old.factor)
+        self.dirty = True
 
     def set_factor(self, block_id: str, factor: float) -> None:
         """Updates only the uniform gain knob (§11.2) -- never re-validates `design`,
         since a block's own params' validity never depends on `factor`."""
         idx = self._index_of(block_id)
         self._blocks[idx] = replace(self._blocks[idx], factor=float(factor))
+        self.dirty = True
+
+    def reseed(self, block_id: str) -> None:
+        """Draws a fresh random seed for a `NOISE` block and re-validates via
+        `update_params()` -- the UI-visible counterpart to `add_block()`'s own
+        one-time random seed (docs/CONCEPT.md §11, CONTRACTS.md §15's seed-
+        persistence bullet): the seed otherwise never changes again on its
+        own, exactly the stability `signals/noise.py`'s docstring already
+        guarantees for unrelated edits -- this is the one explicit, user-
+        triggered exception to that.
+        """
+        block = self.get_block(block_id)
+        if block.kind != "NOISE":
+            raise ValueError(f"reseed() only applies to NOISE blocks, got {block.kind!r}")
+        new_seed = int(np.random.default_rng().integers(0, 2**31 - 1))
+        self.update_params(block_id, seed=new_seed)
 
     def clear(self) -> None:
         self._blocks = []
+        self.dirty = True
+
+    # -- dirty state ------------------------------------------------------------
+
+    def mark_clean(self) -> None:
+        """Call after a save/load round-trip (mirrors `filters.chain.FilterChain.mark_clean`)."""
+        self.dirty = False
 
     # -- validity ------------------------------------------------------------
 

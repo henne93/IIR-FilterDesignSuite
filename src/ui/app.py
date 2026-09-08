@@ -146,6 +146,11 @@ class MainWindow(QMainWindow):
         self.inspector.block_selected.connect(lambda _block_id: self.canvas.refresh())
         self.inspector.params_changed.connect(self._on_inspector_params_changed)
         self.inspector.params_changed.connect(self.time_domain_view.refresh_fs)
+        # Signal-chain edits don't affect filter-chain validity/export gating,
+        # but they do make the project dirty (§15's persistence now covers the
+        # signal chain too, see project_file.py) -- so the title-bar "*" needs
+        # to react to them as well.
+        self.time_domain_view.canvas.chain_changed.connect(self._update_title)
         self._on_chain_changed()
 
     # -- layout ---------------------------------------------------------
@@ -253,8 +258,13 @@ class MainWindow(QMainWindow):
         self._update_title()
 
     def _update_title(self) -> None:
-        star = "*" if self.chain.dirty else ""
+        star = "*" if self._is_dirty() else ""
         self.setWindowTitle(f"IIR Filter Design Suite{star}")
+
+    def _is_dirty(self) -> bool:
+        """True if either chain has unsaved changes -- both are now part of the
+        project file (§15), so either one dirties the project as a whole."""
+        return self.chain.dirty or self.time_domain_view.signal_chain.dirty
 
     def _on_inspector_params_changed(self) -> None:
         self.canvas.refresh()
@@ -298,17 +308,18 @@ class MainWindow(QMainWindow):
 
     def _save_to(self, path: Path) -> None:
         try:
-            save_project(self.chain, path)
+            save_project(self.chain, path, self.time_domain_view.signal_chain)
         except ProjectFileError as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
             return
         self._project_path = path
         self.chain.mark_clean()
+        self.time_domain_view.signal_chain.mark_clean()
         self._update_title()
         self.statusBar().showMessage(f"Saved to {path}", 5000)
 
     def _on_open(self) -> None:
-        if self.chain.dirty:
+        if self._is_dirty():
             reply = QMessageBox.question(
                 self,
                 "Open project?",
@@ -326,10 +337,10 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            fs, blocks = load_project(path_str)
+            fs, blocks, signal_blocks = load_project(path_str)
         except ProjectFileError as exc:
             QMessageBox.critical(self, "Open failed", str(exc))
-            return  # load fully before touching the chain -- a bad file never leaves it half-mutated
+            return  # load fully before touching the chains -- a bad file never leaves them half-mutated
 
         try:
             self.chain.fs = fs
@@ -343,6 +354,17 @@ class MainWindow(QMainWindow):
             if not block["enabled"]:
                 self.chain.set_enabled(block_id, False)
         self.chain.mark_clean()
+
+        # Same "mutate the existing model in place" rule as the filter chain
+        # above -- the canvas/inspector already hold a reference to this
+        # SignalChain instance (owned by TimeDomainView), so it's cleared and
+        # rebuilt rather than swapped for a new one.
+        signal_chain = self.time_domain_view.signal_chain
+        signal_chain.clear()
+        for signal_block in signal_blocks:
+            signal_chain.add_block(signal_block["kind"], factor=signal_block["factor"], **signal_block["params"])
+        signal_chain.mark_clean()
+
         self._project_path = Path(path_str)
 
         self.fs_edit.setText(f"{self.chain.fs:g}")
@@ -350,6 +372,8 @@ class MainWindow(QMainWindow):
         self.canvas.refresh()
         self.inspector.refresh()
         self.time_domain_view.refresh_fs()
+        self.time_domain_view.canvas.refresh()
+        self.time_domain_view.inspector.refresh_live()
         self._on_chain_changed()
         self.statusBar().showMessage(f"Opened {path_str}", 5000)
 
@@ -367,6 +391,16 @@ class MainWindow(QMainWindow):
         Both error dialogs include the relevant path (the export directory
         if one is known, otherwise the destination folder the user picked).
         On success, a confirmation dialog reports the export directory too.
+
+        Also passes the Time-Domain view's `SignalChain` plus its Inspector's
+        *current* duration/full-scale field values (CONCEPT.md §11.4), so the
+        time-domain PNG/CSV artifacts -- when signal blocks exist -- reflect
+        exactly what the user is looking at in that view, not a fixed
+        export-only default. An unparsable duration/full-scale field (e.g.
+        left empty mid-edit) is passed through as `None`, which
+        `export_design()` treats like an empty signal chain: the time-domain
+        artifacts are silently omitted, the rest of the export is unaffected
+        (never a reason to fail Export outright).
         """
         if self.backend is None:
             QMessageBox.critical(
@@ -381,8 +415,25 @@ class MainWindow(QMainWindow):
         if not output_root:
             return
 
+        inspector = self.time_domain_view.inspector
         try:
-            result = export_design(self.chain, self.backend, output_root)
+            duration_ms = inspector.duration_ms()
+        except ValueError:
+            duration_ms = None
+        try:
+            full_scale = inspector.full_scale()
+        except ValueError:
+            full_scale = None
+
+        try:
+            result = export_design(
+                self.chain,
+                self.backend,
+                output_root,
+                signal_chain=self.time_domain_view.signal_chain,
+                time_domain_duration_ms=duration_ms,
+                time_domain_full_scale=full_scale,
+            )
         except (ValueError, ExportError) as exc:
             # ExportError may know the specific export directory it failed
             # inside (see export.ExportError/export_design); a plain
@@ -423,7 +474,7 @@ class MainWindow(QMainWindow):
     # -- close / dirty warning -----------------------------------------------
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
-        if not self.chain.dirty:
+        if not self._is_dirty():
             event.accept()
             return
 
@@ -441,7 +492,7 @@ class MainWindow(QMainWindow):
             return
         if reply == QMessageBox.StandardButton.Save:
             self._on_save()
-            if self.chain.dirty:
+            if self._is_dirty():
                 # Save-as was cancelled or save_project() failed -- stay open
                 # rather than discarding changes the user asked to keep.
                 event.ignore()

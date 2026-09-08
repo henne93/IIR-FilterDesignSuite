@@ -71,6 +71,7 @@ class SignalCanvas(QWidget):
             tile = SignalBlockWidget(block, parent=self)
             tile.params_edited.connect(self.update_params)
             tile.delete_requested.connect(self.request_remove_block)
+            tile.reseed_requested.connect(self.reseed_block)
             self._blocks_row.addWidget(tile)
 
         if blocks:
@@ -96,6 +97,13 @@ class SignalCanvas(QWidget):
 
     def remove_block(self, block_id: str) -> None:
         self.signal_chain.remove_block(block_id)
+        self.chain_changed.emit()
+
+    def reseed_block(self, block_id: str) -> None:
+        try:
+            self.signal_chain.reseed(block_id)
+        except KeyError:
+            return
         self.chain_changed.emit()
 
     def request_remove_block(self, block_id: str) -> None:

@@ -172,6 +172,55 @@ def test_explicit_seed_is_reproducible():
     np.testing.assert_array_equal(a, b)
 
 
+# --- reseed (explicit user action, docs/CONCEPT.md §11) -----------------------
+
+
+def test_reseed_changes_the_seed():
+    chain = SignalChain()
+    bid = chain.add_block("NOISE", amplitude=0.2, seed=1)
+    chain.reseed(bid)
+    assert chain.get_block(bid).design.seed != 1
+
+
+def test_reseed_preserves_other_params_and_stays_valid():
+    chain = SignalChain()
+    bid = chain.add_block("NOISE", amplitude=0.2)
+    chain.reseed(bid)
+    block = chain.get_block(bid)
+    assert block.is_valid, block.error
+    assert block.params["amplitude"] == 0.2
+
+
+def test_reseed_marks_dirty():
+    chain = SignalChain()
+    bid = chain.add_block("NOISE")
+    chain.mark_clean()
+    chain.reseed(bid)
+    assert chain.dirty is True
+
+
+def test_reseed_on_non_noise_block_raises():
+    chain = SignalChain()
+    bid = chain.add_block("DC")
+    with pytest.raises(ValueError, match="NOISE"):
+        chain.reseed(bid)
+
+
+def test_reseed_unknown_block_raises_keyerror():
+    chain = SignalChain()
+    with pytest.raises(KeyError):
+        chain.reseed("nope")
+
+
+def test_reseed_changes_generated_output():
+    chain = SignalChain()
+    bid = chain.add_block("NOISE", amplitude=0.2, seed=1)
+    before = chain.get_block(bid).design.generate(50, FS)
+    chain.reseed(bid)
+    after = chain.get_block(bid).design.generate(50, FS)
+    assert not np.array_equal(before, after)
+
+
 # --- CSV import ----------------------------------------------------------------
 
 
@@ -264,3 +313,44 @@ def test_source_signal_sine_matches_closed_form():
     t = np.arange(n) / FS
     expected = 0.5 * np.sin(2.0 * np.pi * 1_000.0 * t)
     np.testing.assert_allclose(signal, expected)
+
+
+# --- dirty state (mirrors filters.chain.FilterChain, docs/CONTRACTS.md §15) --------
+
+
+def test_starts_clean():
+    assert SignalChain().dirty is False
+
+
+def test_add_block_marks_dirty():
+    chain = SignalChain()
+    chain.add_block("DC")
+    assert chain.dirty is True
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda c, bid: c.remove_block(bid),
+        lambda c, bid: c.update_params(bid, frequency=500.0),
+        lambda c, bid: c.set_factor(bid, 0.5),
+        lambda c, bid: c.clear(),
+    ],
+)
+def test_every_other_mutation_marks_dirty(mutate):
+    """Each method sets `dirty` on its own -- verified by clearing it right
+    after setup (via a prior `add_block`), so a passing add_block alone
+    can't hide a mutator that forgot to set the flag."""
+    chain = SignalChain()
+    bid = chain.add_block("SIN")
+    chain.mark_clean()
+    mutate(chain, bid)
+    assert chain.dirty is True
+
+
+def test_mark_clean_resets_dirty():
+    chain = SignalChain()
+    chain.add_block("DC")
+    assert chain.dirty is True
+    chain.mark_clean()
+    assert chain.dirty is False
