@@ -66,7 +66,7 @@ def _build_and_run_detached_copy(tmp_path: Path, firmware_dir: Path) -> list[int
     compile_cmd = [
         "gcc", "-Wall", "-Wextra", "-Werror", "-std=c11",
         "-I", str(detached),  # the ONLY include path -- no src/c/ anywhere
-        str(detached / "example.c"), str(detached / "biquad_q14.c"),
+        str(detached / "example.c"), str(detached / "biquad_q14.c"), str(detached / "filter_design_calc.c"),
         "-o", str(binary), "-lm",
     ]
     compile_proc = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=30)

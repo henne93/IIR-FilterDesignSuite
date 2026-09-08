@@ -587,14 +587,19 @@ the real implementation propagate to the next export automatically); a
 generated `example.c` wiring up the *specific* chain being exported (one
 `biquad_q14_state_t` per active block, chained in series through a
 `process_chain()` function, matching §12's series-only topology); and a
-`README.md` with integration instructions. `render_firmware_package()`
-(`export.py`) produces all of this from the same `ExportSnapshot` used
-elsewhere, with no new data model. Bundling the design functions (reversing
-an earlier, narrower decision that firmware never needs them since
-coefficients are "already frozen constants") lets a firmware integrator
-recompute Q14 coefficients at runtime -- e.g. to retune a filter -- instead
-of only ever loading the frozen defines in `filter_design.h`. This is proven
-fully self-contained -- not just asserted -- by `tests/test_firmware_package.py`,
+`README.md` with integration instructions. `example.c` itself now
+demonstrates the bundled design functions rather than the frozen defines:
+`filter_chain_init()` calls each block's `filter_design_lp/hp/bp/ap/pk()`
+with that block's own exported design parameters as literal float args
+(e.g. `filter_design_lp(3000.0, 13333.0, &coeffs1)`), not the `FILT<n>_*`
+values from `filter_design.h`. `render_firmware_package()` (`export.py`)
+produces all of this from the same `ExportSnapshot` used elsewhere, with no
+new data model. Bundling the design functions (reversing an earlier,
+narrower decision that firmware never needs them since coefficients are
+"already frozen constants") lets a firmware integrator recompute Q14
+coefficients at runtime -- e.g. to retune a filter -- instead of only ever
+loading the frozen defines in `filter_design.h`. This is proven fully
+self-contained -- not just asserted -- by `tests/test_firmware_package.py`,
 which copies the generated `firmware/` folder to a location with no
 relationship to this repository, compiles it there with `-I` pointed only at
 that copy (no reference to `src/c/` at all), runs the binary, and
@@ -835,9 +840,14 @@ Added after v1's initial "no persistence" decision (§13) was reversed.
     boost/cut; see §3, §5, §7 for its formula and the tighter `Q` range this
     required.
 13. **Export's `firmware/` subfolder now also bundles the Q14 design-function
-    implementation itself, as `filter_design_calc.{h,c}`** — reversing, for this
-    subfolder only, the earlier "firmware doesn't need filter_design_lp/hp/bp/ap()"
-    stance (§10); renamed from `filter_design.{h,c}` solely to avoid colliding with
-    the generated coefficient header of the same original name already in the
-    package. Lets firmware recompute coefficients at runtime instead of only ever
-    loading the frozen `filter_design.h` defines.
+    implementation itself, as `filter_design_calc.{h,c}`, and the generated
+    `example.c` now calls it** — reversing, for this subfolder only, the earlier
+    "firmware doesn't need filter_design_lp/hp/bp/ap()" stance (§10); renamed from
+    `filter_design.{h,c}` solely to avoid colliding with the generated coefficient
+    header of the same original name already in the package. `example.c`'s
+    `filter_chain_init()` now computes each stage's coefficients at runtime via
+    these functions (each block's own design params as literal float args) instead
+    of reading the frozen `FILT<n>_*` defines from `filter_design.h` directly --
+    demonstrating the runtime-recompute path, e.g. for retuning a filter, while
+    `filter_design.h`'s frozen defines remain available for a design that never
+    changes after flashing.

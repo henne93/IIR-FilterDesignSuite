@@ -8,6 +8,7 @@ compilation test, matching the rest of this suite's native-backend tests.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -774,3 +775,22 @@ def test_firmware_example_declares_one_state_per_active_block(tmp_path, native_b
     assert "state1" in text and "state2" in text and "state3" in text
     assert "state4" not in text and "coeffs4" not in text
     assert text.count("biquad_q14_process(&state") == 3
+
+
+def test_firmware_example_computes_coefficients_via_design_functions(tmp_path, native_backend):
+    """example.c must call this design's own filter_design_lp/hp/bp/ap/pk()
+    at runtime to obtain each stage's coefficients (CONTRACTS.md §10) --
+    never read the frozen FILT<n>_* defines directly, and never hand-compute
+    or hardcode a coefficient literal."""
+    chain = _chain_lp_hp_bp_ap()  # LP fc=3000, HP fc=1000, BP f_low=2000/f_high=4000, AP fc=2000 Q=1.0
+    chain.add_block("PK", fc=2500.0, Q=1.0, gain_db=6.0)
+    result = export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+    text = (result.firmware_dir / "example.c").read_text(encoding="utf-8")
+
+    assert not re.search(r"FILT\d+_", text)  # no frozen-define usage (banner comment may still mention them)
+    assert '#include "filter_design_calc.h"' in text
+    assert re.search(r"filter_design_lp\(\s*3000\.0\s*,\s*13333\.0\s*,\s*&coeffs1\s*\);", text)
+    assert re.search(r"filter_design_hp\(\s*1000\.0\s*,\s*13333\.0\s*,\s*&coeffs2\s*\);", text)
+    assert re.search(r"filter_design_bp\(\s*2000\.0\s*,\s*4000\.0\s*,\s*13333\.0\s*,\s*&coeffs3\s*\);", text)
+    assert re.search(r"filter_design_ap\(\s*2000\.0\s*,\s*13333\.0\s*,\s*1\.0\s*,\s*&coeffs4\s*\);", text)
+    assert re.search(r"filter_design_pk\(\s*2500\.0\s*,\s*13333\.0\s*,\s*1\.0\s*,\s*6\.0\s*,\s*&coeffs5\s*\);", text)
