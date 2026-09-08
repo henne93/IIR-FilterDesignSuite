@@ -686,7 +686,7 @@ class FilterChain:
   not) can be saved to and reloaded from a versioned JSON project file. See §15 for the
   format and the UI's in-place-mutation rule. UI chrome (splitter sizes, selected tab,
   window geometry) is never persisted — only chain-model state.
-- **"Clear" button** (canvas toolbar, per CONCEPT.md's mockup) empties the block list
+- **"Clear" action** (Edit menu — see below) empties the block list
   only; **`fs` is left unchanged** — it's a session-wide setting, not chain content,
   and resetting it unexpectedly on "Clear" would be a surprising UX. Destructive and
   irreversible (no undo, per CONCEPT.md §9) — must show a confirmation dialog
@@ -773,7 +773,9 @@ Added after v1's initial "no persistence" decision (§13) was reversed.
   reference to the original `FilterChain` instance, so it is mutated, never replaced.
   A malformed file is fully parsed and validated *before* any mutation begins, so a
   bad file can never leave the app in a half-applied state.
-- Save/Save As/Open are toolbar actions (no menu bar exists in this app); Save
+- Save/Save As/Open live in the **File** menu, alongside Export (Clear/Reset
+  live in the **Edit** menu) — reversing this section's original "no menu bar"
+  assumption; there is no toolbar in this app. Save
   without a known path behaves like Save As. Saving marks the chain clean (same
   `dirty` flag that already drives the title-bar `"*"` and the unsaved-changes-on-close
   warning, §13) and remembers the path for a subsequent plain Save.
@@ -813,3 +815,9 @@ Added after v1's initial "no persistence" decision (§13) was reversed.
     standalone-package variant, plus a generated cascade example)** — reversing, for
     this new subfolder only, the earlier "does not bundle" decision (§10); the
     top-level export files are unchanged.
+11. **Toolbar replaced with a File/Edit menu bar** — File holds Open/Save/Save
+    As/Export, Edit holds Clear/Reset. Purely a UI-chrome change; no behavioral
+    contract above depends on which widget triggers an action (§13).
+12. **Peak (PK), a fifth, non-Butterworth filter type, added** — parametric bell
+    boost/cut; see §3, §5, §7 for its formula and the tighter `Q` range this
+    required.

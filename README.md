@@ -1,199 +1,78 @@
 # IIR Filter Design Suite
 
-Interactive desktop suite for designing 2nd-order Butterworth IIR filter
-chains (LP/HP/BP/AP) for Cortex-M4 firmware targets: PyQt6 UI, ideal
-(float64) vs. Q14 fixed-point (compiled C) response comparison, and a
-PDF + C-header + PNG export pipeline.
+Interactive desktop suite for designing 2nd-order IIR filter chains
+(Butterworth Low-Pass, High-Pass, Band-Pass, All-Pass, plus a parametric
+Peak/EQ filter) for Cortex-M4 firmware targets. PyQt6 UI, ideal (float64) vs.
+Q14 fixed-point (compiled C) response comparison, and a PDF + C-header + PNG
+export pipeline with a self-contained `firmware/` drop-in package.
 
 - Product vision: [`docs/CONCEPT.md`](docs/CONCEPT.md)
-- Authoritative implementation contract (formulas, ABI, tolerances,
-  resolved ambiguities): [`docs/CONTRACTS.md`](docs/CONTRACTS.md)
+- Authoritative implementation contract (exact formulas, ABI, tolerances):
+  [`docs/CONTRACTS.md`](docs/CONTRACTS.md) — wins wherever it and this
+  README disagree.
+- Exploratory architecture note, not implemented:
+  [`docs/adaptive_bandpass_design.md`](docs/adaptive_bandpass_design.md)
 
-This document covers environment setup, running the app, and running the
-test suite. Where anything here conflicts with `docs/CONTRACTS.md`, the
-contract wins.
+## Requirements
 
----
+- Python 3.12+ (developed/tested through 3.14).
+- A GCC- or Clang-compatible C compiler on `PATH` — the native Q14 backend is
+  compiled at every app launch, and there is no mock/degraded mode without it.
+  **MSVC is not supported** (on Windows, use MinGW-w64 GCC or Clang in
+  GNU-compatible mode — not `clang-cl`).
+- No frozen/PyInstaller build — run from source with `python main.py`.
 
-## 1. Requirements
-
-- **Python 3.12 or newer** (developed/tested through 3.14).
-- A **GCC- or Clang-compatible C compiler on PATH** at runtime — see
-  [§3](#3-c-compiler-requirements) below. There is no degraded/mock mode:
-  the app cannot run without a working native Q14 backend
-  (`docs/CONTRACTS.md` §9).
-- No PyInstaller/frozen build in v1 — this is a source / single-folder,
-  `python main.py` delivery (`docs/CONTRACTS.md`, top of file).
-
-## 2. Setting up a virtual environment
-
-From the repository root:
+## Setup
 
 ```bash
 python3 -m venv .venv
-
-# Linux / macOS
-source .venv/bin/activate
-# Windows (PowerShell)
-.venv\Scripts\Activate.ps1
-
+source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-`requirements.txt` pins the Python dependencies:
+`requirements.txt` covers `numpy`, `scipy`, `matplotlib`, `PyQt6`, `reportlab`
+(runtime), and `pytest` (for the test suite below).
 
-| Package | Purpose |
-|---|---|
-| `numpy` | Coefficient/array math |
-| `scipy` | `freqz` evaluation and `dimpulse` (tests only) — never used as a filter *designer* (`docs/CONTRACTS.md` §4) |
-| `matplotlib` | Embedded Bode plots (`ui/widgets/bode_widget.py`) and exported PNGs |
-| `PyQt6` | Desktop UI |
-| `reportlab` | PDF report generation (`export.py`) |
+Linux: `sudo apt install gcc` (or `dnf install gcc`). Windows: install
+MinGW-w64 GCC (e.g. via [MSYS2](https://www.msys2.org/)) and ensure
+`gcc.exe` is on `PATH`. If no working compiler is found, the app shows a
+blocking Retry/Quit dialog with the compiler's error output on startup.
 
-## 3. C compiler requirements
-
-The native Q14 backend (`src/c/filter_design.c`, `src/c/biquad_q14.c`) is
-compiled into a shared library **at every app launch** — recompiled fresh
-each process start, not cached to disk across launches
-(`docs/CONTRACTS.md` §9). Compiler discovery order: the `$CC` environment
-variable (if set) → `gcc` → `cc` → `clang`.
-
-**GCC or Clang only — MSVC is explicitly unsupported.**
-
-### Linux
-
-Install GCC or Clang from your distro's package manager, e.g.:
-
-```bash
-sudo apt install gcc      # Debian/Ubuntu
-sudo dnf install gcc      # Fedora
-```
-
-Compiled with (`c_codegen.py`, matching `docs/CONTRACTS.md` §9 exactly):
-
-```bash
-gcc -O2 -fPIC -shared -o filter_design.so \
-    src/c/filter_design.c src/c/biquad_q14.c -Isrc/c -lm
-```
-
-### Windows
-
-Plain MSVC (`cl.exe`) is **not** supported — ctypes needs a standard cdecl
-DLL without an MSVC-runtime dependency assumption. Two options work:
-
-1. **MinGW-w64 GCC** (recommended) — e.g. via
-   [MSYS2](https://www.msys2.org/) (`pacman -S mingw-w64-x86_64-gcc`) or a
-   standalone MinGW-w64 toolchain. Ensure `gcc.exe` is on `PATH`.
-2. **Clang in GNU-compatible mode** — `clang --target=x86_64-w64-mingw32`.
-   Do **not** use `clang-cl` (MSVC-compatible mode); it assumes an
-   MSVC-style runtime/ABI that ctypes' plain cdecl loading does not expect.
-
-Compiled with (no `-fPIC` needed on Windows):
-
-```bash
-gcc -O2 -shared -o filter_design.dll ^
-    src/c/filter_design.c src/c/biquad_q14.c -Isrc/c -lm
-```
-
-If no working compiler is found (or found but fails to compile), the app
-shows a blocking **Retry**/**Quit** dialog with the compiler's stderr
-before the main window ever appears (`docs/CONTRACTS.md` §9, §13) — there
-is no way to proceed without a successful compile.
-
-## 4. Running the app
+## Running
 
 ```bash
 python main.py
 ```
 
-## 5. Running the tests
+The **File** menu holds Open / Save / Save As / Export; **Edit** holds Clear
+/ Reset (no toolbar). A filter chain can be saved to and reloaded from a
+versioned `.iirfilt` project file.
+
+## Testing
 
 ```bash
 pytest
 ```
 
-`pytest.ini` sets `pythonpath = src/python src`, so no extra `PYTHONPATH`
-setup is needed. A working GCC/Clang on `PATH` is required for the native
-(`test_native_*`, `test_export.py`, `test_firmware_harness.py`) tests —
-`tests/conftest.py` compiles the shared library once per test session.
-
-### Reproducible offscreen Qt test run
-
-The UI tests (`test_ui_smoke.py`, `test_inspector.py`) construct real
-`PyQt6.QtWidgets` objects and need a Qt platform plugin, but not a real
-display. Force the headless `offscreen` plugin explicitly so the run is
-reproducible in CI / over SSH / in any environment without a windowing
-system:
+`pytest.ini` already sets `pythonpath`, so no extra setup is needed. Native
+tests need a working compiler on `PATH` (the shared library is compiled once
+per test session). For a reproducible headless run (CI, SSH, no display):
 
 ```bash
 QT_QPA_PLATFORM=offscreen pytest -q
 ```
 
-(The test files themselves also set `QT_QPA_PLATFORM=offscreen` as a
-default before importing PyQt6, so a plain `pytest` run is headless too —
-the explicit environment variable above is the reproducible, explicit form
-to use in CI configuration.)
+## Export
 
-## 6. Generated firmware header, and the `firmware/` drop-in package
+**File ▸ Export** writes a timestamped `export_YYYYMMDD_HHMMSS/` folder
+containing a PDF report, a coefficient-only `filter_design.h`, Bode/error PNG
+plots, and a `firmware/` subfolder — a complete drop-in C package (header,
+biquad implementation, a generated usage example, and its own README) that
+compiles standalone with no other file from this repository. See
+`docs/CONTRACTS.md` §10 for the exact formats.
 
-`export_design()` writes a per-design `export_YYYYMMDD_HHMMSS/` folder. The
-top-level `filter_design.h` in it is plain integer `#define FILT<n>_B0/.../A2`
-literals plus `Q14_SCALE`/`Q14_TO_FLOAT` (`docs/CONTRACTS.md` §10) —
-intentionally **coefficient-only**, and the top level does not bundle
-`biquad_q14.h`/`biquad_q14.c` alongside it:
-
-- CONCEPT.md §7's export directory listing enumerates exactly
-  `report.pdf`, `filter_design.h`, `bode_combined.png`, `bode_<type>_<n>.png`,
-  and `error_sweep_<n>.png` at the top level — no `biquad_q14.*` entry there.
-- A firmware integrator can still combine the top-level generated header
-  with `src/c/biquad_q14.{h,c}` from this repository themselves, the same
-  way `tests/test_firmware_harness.py` does for verification.
-
-That combination is proven, not just asserted: `tests/test_firmware_harness.py`
-compiles a small harness that `#include`s a freshly generated
-`filter_design.h` together with `src/c/biquad_q14.h`, links against
-`src/c/biquad_q14.c` with `gcc -Wall -Wextra -Werror`, **runs** the
-resulting binary, and cross-checks its output against the same
-`NativeBackend.process_impulse()` ctypes path used elsewhere in this suite.
-
-### The `firmware/` subfolder — a complete, self-contained package
-
-Every export also writes a `firmware/` subfolder containing a version of the
-design meant to be copied into an external project as-is, no other file from
-this repository required:
-
-| File | What it is |
-|---|---|
-| `filter_design.h` | Same generated coefficients as the top-level file (byte-identical). |
-| `biquad_q14.h` | A standalone variant of `src/c/biquad_q14.h`: its `q14_coeffs_t` is inlined (extracted from `src/c/filter_design.h` at export time) instead of `#include`-ing a separate header — this avoids a naming collision with the coefficient header of the same name sitting right next to it, and avoids pulling in the host-side design/quantization functions firmware never needs. |
-| `biquad_q14.c` | A byte-for-byte verbatim copy of `src/c/biquad_q14.c` — never a hand-maintained second copy, so a change to the real implementation propagates to the next export automatically. |
-| `example.c` | Generated for the *specific* chain being exported: one `biquad_q14_state_t` per active block, wired in series (`process_chain()`), plus an illustrative demo `main()`. |
-| `README.md` | Integration instructions for the folder. |
-
-This is proven fully self-contained, not just asserted: `tests/test_firmware_package.py`
-copies the generated `firmware/` folder to a location with no relationship to
-this repository, compiles it there with `gcc -Wall -Wextra -Werror` and `-I`
-pointed only at that copy (no reference to `src/c/` at all), runs the
-binary, and cross-checks its output bit-exactly against the same
-`NativeBackend.process_samples()` ctypes path used elsewhere in this suite.
-
-## 7. Out of scope (v1)
+## Out of scope (v1)
 
 Undo/redo, real-time audio preview, parallel (summing) topology, filter
-orders other than 2nd, and filter families other than Butterworth are all
-explicitly out of scope — see `docs/CONCEPT.md` §9 and `docs/CONTRACTS.md`
-§13.
-
-## 8. Saving and opening project files
-
-The toolbar's **Open** / **Save** / **Save As** actions read and write a
-versioned JSON project file (`.iirfilt`) capturing a filter chain's full
-state — sample rate, and every block's kind, parameters, and enabled flag,
-in chain order, including any currently-invalid or disabled blocks
-(`docs/CONTRACTS.md` §15). It does not capture UI layout (splitter sizes,
-selected tab, window geometry) — only the chain model itself.
-
-Opening a project follows the same unsaved-changes confirmation as **Reset**
-if the current chain is dirty, then replaces the chain's contents in place
-(the app never constructs a new chain object, so canvas/inspector stay
-wired up correctly).
+orders other than 2nd, and filter families other than Butterworth (Peak/EQ
+is the one non-Butterworth exception — see `docs/CONCEPT.md` §2/§9).

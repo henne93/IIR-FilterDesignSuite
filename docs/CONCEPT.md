@@ -1,22 +1,28 @@
 # IIR Filter Design Suite — Concept Document
 
-**Status:** Design phase  
+**Status:** Implemented (v1 shipped, and extended beyond the original v1 scope)  
 **Forked from:** IIR-Compare  
-**Date:** 2026-08-18  
+**Date:** 2026-08-18 (original vision) — last revised 2026-09-08  
 
 > **Implementation-ready contracts:** exact formulas, interfaces, ABI, tolerances, and
 > resolved ambiguities live in [`CONTRACTS.md`](./CONTRACTS.md), which is authoritative
 > wherever it differs from the sketches in this document (notably the Band-Pass and
-> All-Pass coefficient formulas below — see CONTRACTS.md §3).
+> All-Pass coefficient formulas below — see CONTRACTS.md §3). CONTRACTS.md's
+> "Summary of deviations" section is the single source of truth for everything that
+> changed since this document was first written; this revision folds the
+> user-facing consequences of those deviations back into the sections below.
+> For setup and day-to-day usage, see [`README.md`](../README.md).
 
 ---
 
 ## 1. Goal
 
-An interactive desktop design suite for 2nd-order Butterworth IIR filters targeting
-embedded Cortex-M4 devices. The user assembles a chain of filter blocks, inspects each
-filter's Bode diagram (ideal vs Q14 C implementation), and exports a self-contained
-deliverable (PDF report + C header + PNG plots) ready to drop into firmware.
+An interactive desktop design suite for 2nd-order IIR filters (Butterworth LP/HP/BP/AP,
+plus a parametric Peak/EQ type) targeting embedded Cortex-M4 devices. The user assembles
+a chain of filter blocks, inspects each filter's Bode diagram (ideal vs Q14 C
+implementation), and exports a self-contained deliverable (PDF report, C header, PNG
+plots, and a drop-in `firmware/` package) ready to drop into firmware. Chains can also be
+saved to and reloaded from a project file for later editing.
 
 ---
 
@@ -73,8 +79,7 @@ All filters are **2nd-order Butterworth** unless noted. All support both a
 ```
 IIR-FilterDesignSuite/
 ├── main.py                        Entry point — launches PyQt6 app
-├── requirements.txt               PyQt6, matplotlib, scipy, numpy, reportlab
-├── setup_venv.py                  Cross-platform venv bootstrap (from IIR-Compare)
+├── requirements.txt               numpy, scipy, matplotlib, PyQt6, reportlab, pytest
 │
 ├── src/
 │   ├── python/
@@ -84,29 +89,33 @@ IIR-FilterDesignSuite/
 │   │   │   ├── highpass.py        ButterworthHP
 │   │   │   ├── bandpass.py        ButterworthBP
 │   │   │   ├── allpass.py         ButterworthAP
-│   │   │   └── peak.py            PeakFilter (parametric EQ, not Butterworth)
-│   │   ├── c_codegen.py           Compiles src/c/ → shared lib; exposes Q14 design fns
+│   │   │   ├── peak.py            PeakFilter (parametric EQ, not Butterworth)
+│   │   │   └── chain.py           FilterChain — ordered series cascade, shared fs
+│   │   ├── c_codegen.py           Compiles src/c/ → shared lib; exposes Q14 design fns (NativeBackend)
 │   │   ├── error_analysis.py      Error sweep: ideal vs Q14 across full fc range
-│   │   └── export.py              PDF report + C header (.h) + PNG export
+│   │   ├── export.py              PDF report + C header + PNGs + self-contained firmware/ package
+│   │   └── project_file.py        Save/load a chain to/from a versioned .iirfilt JSON file
 │   │
 │   ├── c/
-│   │   ├── filter_design.h/.c     Q14 coefficient design: lp, hp, bp, ap
+│   │   ├── filter_design.h/.c     Q14 coefficient design: lp, hp, bp, ap, pk
 │   │   └── biquad_q14.h/.c        Generic Direct Form 1 Q14 biquad (state + process)
 │   │
 │   └── ui/
-│       ├── app.py                 QMainWindow — three-panel layout
+│       ├── app.py                 QMainWindow — three-panel layout, File/Edit menu bar (no toolbar)
 │       ├── palette.py             Left panel: draggable filter type buttons
 │       ├── canvas.py              Center panel: design canvas (drop zone, chain view)
-│       ├── inspector.py           Right panel: Bode plot + coefficient table
+│       ├── inspector.py           Right panel: Bode + gain plots, coefficient table, live metrics
 │       └── widgets/
-│           ├── filter_block.py    Draggable/selectable filter block widget
-│           └── bode_widget.py     Embedded matplotlib FigureCanvas (amplitude + phase)
+│           ├── filter_block.py       Draggable/selectable filter block widget
+│           ├── bode_widget.py        Embedded matplotlib FigureCanvas (amplitude + phase)
+│           ├── gain_widget.py        Embedded linear frequency/linear gain plot
+│           └── measurement_cursor.py Hover cursor synced across one tab's plots
 │
-└── tests/
-    ├── conftest.py                Compiles shared lib once per session
-    ├── test_coefficients.py       Q14 accuracy vs scipy for all 4 filter types
-    ├── test_error_sweep.py        Max/RMS error across fc sweep per filter type
-    └── test_bode.py               Bode response shape (passband, stopband, -3dB point)
+└── tests/                         pytest suite: per-filter-type math (test_lowpass.py, ...,
+                                   test_peak.py), native Q14 ABI/coefficient/impulse/
+                                   saturation tests, export + firmware-package round trips,
+                                   project-file round trips, and offscreen UI smoke tests
+                                   (see README.md §5 for how to run them)
 ```
 
 ---
@@ -115,7 +124,7 @@ IIR-FilterDesignSuite/
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  IIR Filter Design Suite          fs = [13333] Hz   [Export ▾]               │
+│  File   Edit                      IIR Filter Design Suite   fs = [13333] Hz  │
 ├────────────┬───────────────────────────────────┬────────────────────────────┤
 │  PALETTE   │         DESIGN CANVAS             │       INSPECTOR            │
 │            │                                   │                            │
@@ -128,12 +137,13 @@ IIR-FilterDesignSuite/
 │  ┌──────┐  │  │                              │ │  │                       │ │
 │  │  BP  │  │  │  drag filter blocks here     │ │  │  Phase (°)            │ │
 │  └──────┘  │  │  connect in series           │ │  └───────────────────────┘ │
-│  ┌──────┐  │  └──────────────────────────────┘ │                            │
-│  │  AP  │  │                                   │  Coefficients:             │
-│  └──────┘  │  [Select All] [Clear] [Validate]  │  ┌────────┬───────┬──────┐ │
-│            │                                   │  │        │ Ideal │ Q14  │ │
-└────────────┴───────────────────────────────────┤  │ b0     │0.1023 │0.1021│ │
-                                                 │  │ b1     │0.2046 │0.2044│ │
+│  ┌──────┐  │  └──────────────────────────────┘ │  ┌── linear gain/freq ──┐ │
+│  │  AP  │  │                                   │  └───────────────────────┘ │
+│  └──────┘  │                                   │  Coefficients:             │
+│  ┌──────┐  │                                   │  ┌────────┬───────┬──────┐ │
+│  │  PK  │  │                                   │  │        │ Ideal │ Q14  │ │
+│  └──────┘  │                                   │  │ b0     │0.1023 │0.1021│ │
+└────────────┴───────────────────────────────────┤  │ b1     │0.2046 │0.2044│ │
                                                  │  │ b2     │0.1023 │0.1021│ │
                                                  │  │ a1     │-1.358 │-1.357│ │
                                                  │  │ a2     │0.5916 │0.5916│ │
@@ -144,6 +154,10 @@ IIR-FilterDesignSuite/
                                                  │  coefficient sweep: 1000  │
                                                  └────────────────────────────┘
 ```
+
+`File` (Open, Save, Save As, Export) and `Edit` (Clear, Reset) are a menu bar,
+not a toolbar — there is no dedicated toolbar row, and no "Select All" or
+"Validate" button anywhere: validation is fully automatic (see below).
 
 ### Panel behaviour
 
@@ -158,16 +172,24 @@ IIR-FilterDesignSuite/
 - Clicking a block selects it and updates the Inspector.
 - A "Combined" view plots the cascade Bode (product of all transfer functions).
 - Blocks can be reordered by drag, deleted with Delete key.
+- **Clear** (Edit menu) empties the chain after a confirmation dialog; `fs` is
+  left unchanged since it's a session-wide setting, not chain content.
 
 **Inspector (right)**
 - Tab strip: "Combined" + one tab per filter block in the chain.
 - Bode diagram: amplitude (dB) and phase (°, unwrapped) on two stacked subplots.
   - Two curves: **Ideal** (scipy) and **C Q14** (from compiled shared lib).
   - x-axis: log scale, 10 Hz to min(0.7·fs, fs/2−1).
-  - y-axis: data-driven.
-- Coefficient table: b0, b1, b2, a1, a2 — ideal (float) vs Q14 (int32_t / 2¹⁴).
+  - y-axis: phase fixed to ±180°; magnitude floor fixed at −100 dB (the top
+    stays data-driven so filters with >0 dB gain, e.g. Peak boost, stay visible).
+- A second, linear frequency/linear-gain plot sits below the Bode plot; a
+  shared hover cursor synchronizes a frequency marker across both plots in
+  the active tab, showing magnitude/phase/gain at the pointer.
+- Coefficient table: b0, b1, b2, a1, a2 — ideal (float) vs Q14 (int16_t / 2¹⁴).
 - Selected-filter response validation: max and RMS amplitude error (dB) between the
   ideal and Q14 responses for the current design.
+- All of the above recomputes automatically on every parameter/chain edit —
+  there is no "Validate" action anywhere in the UI.
 - C coefficient accuracy: a sweep of 1,000 cutoff frequencies over the complete
   supported cutoff range, comparing C-generated coefficients with ideal coefficients.
   Report max and RMS absolute coefficient error, plus the worst-case cutoff. This is
@@ -177,7 +199,11 @@ IIR-FilterDesignSuite/
 
 ## 5. C Coefficient Design
 
-All five filter types use the **bilinear transform** with pre-warping at fc.
+All five filter types use the **bilinear transform**. LP, HP, BP, and PK
+pre-warp their critical frequency/frequencies (`K = tan(π·f/fs)`); AP is the
+one exception — its defining properties (unity magnitude, `-180°` at `fc`)
+hold for the un-prewarped digital `w0 = 2π·fc/fs` directly, so it skips
+pre-warping (see CONTRACTS.md §3).
 
 ```c
 // shared precomputation (K = tan(π·fc/fs))
@@ -197,8 +223,9 @@ float norm = K2 + M_SQRT2 * K + 1.0f;   // Butterworth Q = 1/√2
 //       prototype with A = 10^(gain_dB/40), pre-warped like LP/HP/BP;
 //       exact formula in CONTRACTS.md §3
 
-// Q14 quantization:
-int32_t q14(float x) { return (int32_t)roundf(x * 16384.0f); }
+// Q14 quantization (storage is int16_t — narrowed from an earlier int32_t
+// design; see CONTRACTS.md §7 for the domain-sweep headroom analysis):
+int16_t q14(float x) { return (int16_t)roundf(x * 16384.0f); }
 ```
 
 The C design functions (`filter_design.c`) are called at runtime (same as IIR-Compare).
@@ -220,9 +247,10 @@ For each filter block in the Inspector, the response comparison runs:
 3. Compute amplitude error = `|ideal_dB − q14_dB|` over the plotted frequency grid.
 4. Report max and RMS amplitude error in dB.
 
-The "Validate" button in the canvas runs this response comparison for all blocks and
-surfaces any block where max amplitude error > 0.1 dB with a warning badge. The same
-comparison is also shown for the combined series cascade.
+This response comparison re-runs automatically for every block on each parameter/chain
+edit (there is no manual "Validate" action) and surfaces any block where max amplitude
+error > 0.1 dB with a warning badge. The same comparison is also shown for the combined
+series cascade.
 
 ### C coefficient accuracy sweep
 
@@ -247,7 +275,8 @@ coefficient error.
 
 ## 7. Export / Delivery
 
-Triggered by the **Export** button in the toolbar. Produces a timestamped output folder:
+Triggered by **File ▸ Export** (a plain menu action, not a toolbar button).
+Produces a timestamped output folder:
 
 ```
 export_YYYYMMDD_HHMMSS/
@@ -255,7 +284,8 @@ export_YYYYMMDD_HHMMSS/
 ├── filter_design.h     C header with Q14 coefficients for all blocks
 ├── bode_combined.png   Combined chain Bode plot
 ├── bode_<type>_<n>.png Individual Bode plot per block
-└── error_sweep_<n>.png Error-vs-fc sweep plot per block
+├── error_sweep_<n>.png Error-vs-fc sweep plot per block
+└── firmware/           Self-contained drop-in package (see below)
 ```
 
 ### PDF report contents
@@ -268,17 +298,33 @@ export_YYYYMMDD_HHMMSS/
 
 ### C header format
 
+Plain integer literals, not a `Q14(...)` macro — so the header compiles
+standalone without the firmware consumer having to define anything first
+(see CONTRACTS.md §10 for why this revises the original sketch):
+
 ```c
-// Generated by IIR Filter Design Suite — 2026-08-18T10:30:00
+// Generated by IIR Filter Design Suite — 2026-08-18T10:30:00+02:00
 // fs = 13333 Hz
 
+#define Q14_SCALE 16384
+#define Q14_TO_FLOAT(x) ((float)(x) / Q14_SCALE)
+
 // Filter 1: Butterworth Low-Pass  fc = 3000 Hz
-#define FILT1_B0  Q14(0.10234f)   // 1677  (Q14 = 16384 * coeff)
-#define FILT1_B1  Q14(0.20468f)   // 3354
-#define FILT1_B2  Q14(0.10234f)   // 1677
-#define FILT1_A1  Q14(-1.35822f)  // -22253
-#define FILT1_A2  Q14(0.59158f)   // 9695
+#define FILT1_B0  1677    // 0.10233688f (Q14, scale=16384)
+#define FILT1_B1  3354    // 0.20467377f
+#define FILT1_B2  1677    // 0.10233688f
+#define FILT1_A1  -22253  // -1.35822105f
+#define FILT1_A2  9695    // 0.59158379f
 ```
+
+### The `firmware/` package
+
+Every export also writes a `firmware/` subfolder — a complete, self-contained
+drop-in package for an external firmware project, needing no other file from
+this repository: the same `filter_design.h`, a standalone `biquad_q14.h`/`.c`
+pair, a generated `example.c` wiring the exported chain's blocks in series,
+and a `README.md` with integration instructions. See README.md §6 for details
+and how it's verified to actually compile and run standalone.
 
 ---
 
@@ -287,12 +333,16 @@ export_YYYYMMDD_HHMMSS/
 | Decision | Choice | Reason |
 |----------|--------|--------|
 | Filter order | 2nd only | Single SOS section; simpler C, easier to validate |
-| C arithmetic | Q14 fixed-point | Matches IIR-Compare baseline; runs on M0/M3/M4 without FPU |
+| C arithmetic | Q14 fixed-point, `int16_t` storage | Runs on M0/M3/M4 without FPU; narrowed from an initial `int32_t` design to keep the firmware-facing biquad 16-bit end to end (matches a 16-bit ADC/DAC pipeline) — see CONTRACTS.md §7 |
 | UI framework | PyQt6 + embedded matplotlib | All-Python; no JS build step; matplotlib handles Bode natively |
+| UI chrome | File/Edit menu bar, no toolbar | File: Open/Save/Save As/Export; Edit: Clear/Reset — replaced an earlier toolbar-based sketch |
 | Band-pass parameterization | f_low + f_high | Intuitive as passband edges; fc and Q shown as derived values |
 | All-pass Q | User-adjustable, default `1/√2` | Q controls phase-transition steepness; unity magnitude is preserved; UI range `0.25 <= Q <= 4.0` |
+| Peak filter | Added as a 5th, non-Butterworth type | Parametric bell boost/cut for EQ use cases; narrower `Q` range (`0.8–4.0`) to keep coefficients within int16 headroom at extreme gain |
 | Chain topology | Series only | Parallel (summing) is out of scope for v1 |
-| Export | PDF + C header + PNGs | PDF for documentation, header for firmware, PNGs for datasheets |
+| Validation | Fully automatic, no "Validate" action | Every parameter/chain edit recomputes response error and coefficient-sweep metrics immediately |
+| Persistence | Save/Open a versioned `.iirfilt` JSON project file | Reverses the original "no save/load in v1" decision; round-trips the full chain (including invalid/disabled blocks) |
+| Export | PDF + C header + PNGs + self-contained `firmware/` package | PDF for documentation, header for firmware, PNGs for datasheets, `firmware/` for a zero-dependency drop-in |
 | Compilation | Runtime ctypes (subprocess gcc) | Same pattern as IIR-Compare; no build system needed |
 
 ---
@@ -300,13 +350,17 @@ export_YYYYMMDD_HHMMSS/
 ## 9. Out of Scope (v1)
 
 - Filter orders other than 2nd
-- Filter families other than Butterworth (Chebyshev, Elliptic, Bessel)
+- Filter families other than Butterworth (Chebyshev, Elliptic, Bessel) —
+  Peak/EQ was added later (§2) as a 5th block type within the same
+  2nd-order/Q14 framework, not as a new filter *family* in this sense
 - Parallel filter topology (summing junction)
 - Bandpass as LP+HP cascade (use true 2nd-order BP biquad instead)
 - Floating-point C implementation (Q14 only)
 - Real-time audio preview
 - Undo/redo history
-- Save/load project file
+
+**No longer out of scope:** save/load project files shipped after v1's initial
+cut (§8, §10) — see CONTRACTS.md §13/§15 for the format and UI rules.
 
 ---
 
@@ -322,3 +376,14 @@ export_YYYYMMDD_HHMMSS/
 | 6 | Inspector | Live Bode update + coefficient table on block select |
 | 7 | Export | PDF + C header + PNG export pipeline |
 | 8 | Tests | Pytest suite: coefficient accuracy, error sweep, Bode shape |
+
+**Delivered beyond the original v1 plan:**
+
+| Milestone | Deliverable |
+|-----------|-------------|
+| Int16 Q14 storage | Coefficients/state narrowed from `int32_t` to `int16_t`, saturating 32-bit accumulator (CONTRACTS.md §7) |
+| Firmware package export | Self-contained `firmware/` subfolder per export, proven to compile/run standalone (`tests/test_firmware_package.py`) |
+| Project save/load | Versioned `.iirfilt` JSON round-trip (`project_file.py`, `tests/test_project_file.py`) |
+| Fixed Bode y-axes | Phase locked to ±180°, magnitude floor locked to −100 dB, in both the GUI and exported plots |
+| File/Edit menu bar | Replaced the original toolbar sketch; Open/Save/Save As/Export under File, Clear/Reset under Edit |
+| Peak (PK) filter type | Parametric bell EQ, a 5th block type (§2), including its own coefficient-domain int16-headroom analysis |
