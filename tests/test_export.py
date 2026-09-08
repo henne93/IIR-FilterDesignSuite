@@ -19,7 +19,11 @@ from error_analysis import COEFFICIENT_SWEEP_N
 from export import (
     C_SRC_DIR,
     FILTER_KIND_NAMES,
+    FIRMWARE_FILTER_SOURCES_DIRNAME,
+    MAGNITUDE_YLIM_FLOOR,
+    MAGNITUDE_YLIM_STEP,
     ExportError,
+    _adaptive_magnitude_ylim,
     _sweep_design_at,
     build_snapshot,
     export_design,
@@ -106,6 +110,45 @@ def test_pdf_write_failure_wrapped_as_export_error(tmp_path, native_backend):
     bad_path.mkdir()
     with pytest.raises(ExportError, match="report.pdf"):
         render_pdf(snapshot, bad_path, tmp_path / "combined.png", {})
+
+
+# --- adaptive magnitude y-axis floor ---------------------------------------------
+
+
+def test_adaptive_magnitude_ylim_keeps_top_unchanged():
+    _bottom, top = _adaptive_magnitude_ylim(-37.2, 12.6)
+    assert top == 12.6  # top bound formula is untouched by the adaptive-floor change
+
+
+def test_adaptive_magnitude_ylim_rounds_bottom_down_to_clean_step():
+    bottom, _top = _adaptive_magnitude_ylim(-37.2, 12.6)
+    assert bottom == -40.0  # floor(-37.2 / 10) * 10
+    assert bottom % MAGNITUDE_YLIM_STEP == 0
+
+
+def test_adaptive_magnitude_ylim_caps_bottom_at_floor_for_deep_notches():
+    # A filter with an extreme notch/null must not drag the whole axis down
+    # past the -100 dB floor and squash everything else into a sliver.
+    bottom, top = _adaptive_magnitude_ylim(-250.0, 3.0)
+    assert bottom == MAGNITUDE_YLIM_FLOOR
+    assert top == 3.0
+
+
+def test_adaptive_magnitude_ylim_does_not_squash_small_excursion_filters():
+    # A Peak/EQ filter with a small, mostly-flat response shouldn't be
+    # forced down to the full -100 dB floor -- the point of the adaptive
+    # bottom.
+    bottom, top = _adaptive_magnitude_ylim(-2.1, 6.4)
+    assert bottom > MAGNITUDE_YLIM_FLOOR
+    assert bottom == -10.0
+    assert top == 6.4
+
+
+def test_adaptive_magnitude_ylim_guards_against_degenerate_span():
+    bottom, top = _adaptive_magnitude_ylim(-150.0, -120.0)  # both below the floor
+    assert top == MAGNITUDE_YLIM_FLOOR
+    assert bottom == MAGNITUDE_YLIM_FLOOR - MAGNITUDE_YLIM_STEP
+    assert bottom < top
 
 
 # --- PNG generation -------------------------------------------------------------
@@ -656,6 +699,54 @@ def test_pdf_combined_section_break_survives_with_a_single_block(native_backend)
     assert isinstance(story[combined_idx - 1], PageBreak)
 
 
+# --- PDF sub-chapter heading/content keep-together --------------------------------
+
+
+def test_pdf_headings_are_flagged_keep_with_next(native_backend):
+    """Every sub-chapter heading (per-filter, Combined chain, C header
+    listing, Test results) must set reportlab's `keepWithNext` so the
+    doctemplate's own flowable engine never renders the heading alone at the
+    bottom of a page with its content starting on the next (handled via
+    keepWithNext rather than an explicit KeepTogether wrapper specifically
+    so the flat `story` list -- and the PageBreak-adjacency tests above that
+    walk it -- stays unaffected)."""
+    from reportlab.platypus import Paragraph
+
+    chain = _chain_lp_hp_bp_ap()
+    story = _story_for(chain, native_backend)
+
+    heading_texts = {"Combined chain", "C header listing (filter_design.h)", "Test results"}
+    headings = [
+        item
+        for item in story
+        if isinstance(item, Paragraph) and (item.text.startswith("FILT") or item.text in heading_texts)
+    ]
+    assert len(headings) == 4 + 3  # 4 filter sections + Combined/header-listing/results
+    for heading in headings:
+        assert heading.getKeepWithNext() == 1
+
+    # The title/summary paragraphs on page 1 are not sub-chapter headings.
+    title = next(item for item in story if isinstance(item, Paragraph) and "Export Report" in item.text)
+    assert title.getKeepWithNext() == 0
+
+
+def test_pdf_sections_without_leading_page_break_still_keep_heading_with_content(native_backend):
+    """Sections 4 (C header listing) and 5 (Test results) get no forced
+    PageBreak of their own (unlike every per-filter section and Combined
+    chain) -- keepWithNext is what protects *these* headings specifically
+    from landing alone at the bottom of whatever page precedes them."""
+    from reportlab.platypus import PageBreak, Paragraph
+
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+    story = _story_for(chain, native_backend)
+
+    for text in ("C header listing (filter_design.h)", "Test results"):
+        idx = next(i for i, item in enumerate(story) if isinstance(item, Paragraph) and item.text == text)
+        assert not isinstance(story[idx - 1], PageBreak)
+        assert story[idx].getKeepWithNext() == 1
+
+
 # --- filesystem failure handling -----------------------------------------------------
 
 
@@ -668,6 +759,47 @@ def test_export_root_colliding_with_existing_file_raises_export_error(tmp_path, 
 
     with pytest.raises(ExportError, match="output"):
         export_design(chain, native_backend, blocked_root, now=FIXED_NOW)
+
+
+def test_export_root_collision_error_has_no_output_dir(tmp_path, native_backend):
+    """No export directory was ever created for this failure (it fails
+    before `_make_export_dir` can succeed), so `output_dir` stays None --
+    the ui/app.py error dialog falls back to the destination the user
+    picked in that case."""
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+
+    blocked_root = tmp_path / "output"
+    blocked_root.write_text("i am a file, not a directory")
+
+    with pytest.raises(ExportError) as excinfo:
+        export_design(chain, native_backend, blocked_root, now=FIXED_NOW)
+    assert excinfo.value.output_dir is None
+
+
+def test_export_error_after_dir_creation_carries_the_export_dir(tmp_path, native_backend, monkeypatch):
+    """A failure raised *after* the export directory was created (here,
+    forced during PDF generation) must have that directory attached to the
+    raised ExportError, even though the failure site itself (render_pdf)
+    never learns the directory -- export_design() back-fills it (CONTRACTS.md
+    §10/§13-adjacent UX: the ui/app.py error dialog can then point at the
+    partial export directory instead of only the destination root)."""
+    import export as export_module
+
+    chain = FilterChain(fs=FS)
+    chain.add_block("LP", fc=3000.0)
+
+    def _boom(*args, **kwargs):
+        raise ExportError("boom")
+
+    monkeypatch.setattr(export_module, "render_pdf", _boom)
+
+    with pytest.raises(ExportError) as excinfo:
+        export_design(chain, native_backend, tmp_path, now=FIXED_NOW)
+
+    assert excinfo.value.output_dir is not None
+    assert excinfo.value.output_dir.parent == tmp_path
+    assert excinfo.value.output_dir.is_dir()  # the partial export dir really was created
 
 
 def test_header_write_failure_raises_export_error(tmp_path, native_backend):
@@ -708,15 +840,24 @@ def test_firmware_subfolder_contains_expected_files(tmp_path, native_backend):
     result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
 
     assert result.firmware_dir == result.output_dir / "firmware"
+    # Top level: only the two files an integrator actually names/reads, plus
+    # the README -- every filter *source* file is nested under biquad_q14/.
     names = {p.name for p in result.firmware_dir.iterdir()}
     assert names == {
         "filter_design.h",
+        "example.c",
+        "README.md",
+        FIRMWARE_FILTER_SOURCES_DIRNAME,
+    }
+
+    sources_dir = result.firmware_dir / FIRMWARE_FILTER_SOURCES_DIRNAME
+    assert sources_dir.is_dir()
+    source_names = {p.name for p in sources_dir.iterdir()}
+    assert source_names == {
         "filter_design_calc.h",
         "filter_design_calc.c",
         "biquad_q14.h",
         "biquad_q14.c",
-        "example.c",
-        "README.md",
     }
 
 
@@ -725,7 +866,8 @@ def test_firmware_biquad_c_is_byte_identical_to_src_c(tmp_path, native_backend):
     change to src/c/biquad_q14.c must propagate to the next export automatically."""
     result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
 
-    assert (result.firmware_dir / "biquad_q14.c").read_bytes() == (C_SRC_DIR / "biquad_q14.c").read_bytes()
+    bundled = result.firmware_dir / FIRMWARE_FILTER_SOURCES_DIRNAME / "biquad_q14.c"
+    assert bundled.read_bytes() == (C_SRC_DIR / "biquad_q14.c").read_bytes()
 
 
 def test_firmware_design_calc_header_is_byte_identical_to_src_c(tmp_path, native_backend):
@@ -733,7 +875,8 @@ def test_firmware_design_calc_header_is_byte_identical_to_src_c(tmp_path, native
     .c file it needs no rewrite -- a pure verbatim copy of src/c/filter_design.h."""
     result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
 
-    assert (result.firmware_dir / "filter_design_calc.h").read_bytes() == (C_SRC_DIR / "filter_design.h").read_bytes()
+    bundled = result.firmware_dir / FIRMWARE_FILTER_SOURCES_DIRNAME / "filter_design_calc.h"
+    assert bundled.read_bytes() == (C_SRC_DIR / "filter_design.h").read_bytes()
 
 
 def test_firmware_design_calc_source_matches_src_c_except_include(tmp_path, native_backend):
@@ -743,16 +886,29 @@ def test_firmware_design_calc_source_matches_src_c_except_include(tmp_path, nati
     result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
 
     original = (C_SRC_DIR / "filter_design.c").read_text(encoding="utf-8")
-    bundled = (result.firmware_dir / "filter_design_calc.c").read_text(encoding="utf-8")
+    bundled = (result.firmware_dir / FIRMWARE_FILTER_SOURCES_DIRNAME / "filter_design_calc.c").read_text(
+        encoding="utf-8"
+    )
     assert bundled == original.replace('#include "filter_design.h"', '#include "filter_design_calc.h"', 1)
 
 
 def test_firmware_header_has_no_filter_design_include_and_defines_q14_coeffs(tmp_path, native_backend):
     result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
 
-    text = (result.firmware_dir / "biquad_q14.h").read_text(encoding="utf-8")
+    text = (result.firmware_dir / FIRMWARE_FILTER_SOURCES_DIRNAME / "biquad_q14.h").read_text(encoding="utf-8")
     assert '#include "filter_design.h"' not in text
     assert '#include "filter_design_calc.h"' in text
+
+
+def test_firmware_example_includes_point_into_sources_subfolder(tmp_path, native_backend):
+    """example.c sits at firmware/'s top level while the headers it needs
+    live under biquad_q14/, so its own #includes must be subfolder-qualified
+    (CONTRACTS.md §10's firmware/ layout)."""
+    result = export_design(_chain_lp_hp_bp_ap(), native_backend, tmp_path, now=FIXED_NOW)
+
+    text = (result.firmware_dir / "example.c").read_text(encoding="utf-8")
+    assert f'#include "{FIRMWARE_FILTER_SOURCES_DIRNAME}/filter_design_calc.h"' in text
+    assert f'#include "{FIRMWARE_FILTER_SOURCES_DIRNAME}/biquad_q14.h"' in text
 
 
 def test_firmware_filter_design_h_matches_top_level_content(tmp_path, native_backend):
@@ -788,7 +944,7 @@ def test_firmware_example_computes_coefficients_via_design_functions(tmp_path, n
     text = (result.firmware_dir / "example.c").read_text(encoding="utf-8")
 
     assert not re.search(r"FILT\d+_", text)  # no frozen-define usage (banner comment may still mention them)
-    assert '#include "filter_design_calc.h"' in text
+    assert f'#include "{FIRMWARE_FILTER_SOURCES_DIRNAME}/filter_design_calc.h"' in text
     assert re.search(r"filter_design_lp\(\s*3000\.0\s*,\s*13333\.0\s*,\s*&coeffs1\s*\);", text)
     assert re.search(r"filter_design_hp\(\s*1000\.0\s*,\s*13333\.0\s*,\s*&coeffs2\s*\);", text)
     assert re.search(r"filter_design_bp\(\s*2000\.0\s*,\s*4000\.0\s*,\s*13333\.0\s*,\s*&coeffs3\s*\);", text)

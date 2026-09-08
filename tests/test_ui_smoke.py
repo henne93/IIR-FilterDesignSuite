@@ -672,6 +672,8 @@ def test_main_returns_nonzero_and_shows_no_window_when_compiler_unavailable(qapp
 def test_export_action_writes_full_file_set(window, monkeypatch, tmp_path):
     window.canvas.add_block("LP", fc=3000.0)
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path))
+    info_calls = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: info_calls.append(a[2] if len(a) > 2 else ""))
 
     window._on_export()
 
@@ -679,6 +681,10 @@ def test_export_action_writes_full_file_set(window, monkeypatch, tmp_path):
     assert len(export_dirs) == 1
     assert (export_dirs[0] / "filter_design.h").is_file()
     assert (export_dirs[0] / "report.pdf").is_file()
+
+    # Success is reported via a confirmation dialog naming the export dir.
+    assert len(info_calls) == 1
+    assert str(export_dirs[0]) in info_calls[0]
 
 
 def test_export_cancelled_dialog_writes_nothing(window, monkeypatch, tmp_path):
@@ -699,7 +705,36 @@ def test_export_empty_chain_reports_error_without_raising(window, monkeypatch, t
 
     assert len(critical_calls) == 1
     assert "empty" in critical_calls[0]
+    # No export directory was ever created for this failure, so the error
+    # dialog falls back to reporting the destination folder the user picked.
+    assert str(tmp_path) in critical_calls[0]
     assert list(tmp_path.iterdir()) == []
+
+
+def test_export_pdf_failure_reports_error_with_partial_export_dir(window, monkeypatch, tmp_path):
+    """A failure raised after the export directory is already created (e.g.
+    PDF generation) must point the error dialog at that specific directory,
+    not just the destination folder the user picked."""
+    window.canvas.add_block("LP", fc=3000.0)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path))
+    critical_calls = []
+    monkeypatch.setattr(QMessageBox, "critical", lambda *a, **k: critical_calls.append(a[2] if len(a) > 2 else ""))
+
+    import export as export_module
+
+    monkeypatch.setattr(
+        export_module,
+        "render_pdf",
+        lambda *a, **k: (_ for _ in ()).throw(export_module.ExportError("boom")),
+    )
+
+    window._on_export()
+
+    assert len(critical_calls) == 1
+    assert "boom" in critical_calls[0]
+    export_dirs = list(tmp_path.iterdir())
+    assert len(export_dirs) == 1  # the export dir was created before the injected failure
+    assert str(export_dirs[0]) in critical_calls[0]
 
 
 def test_export_always_forces_fresh_validation_not_a_stale_cache(window, monkeypatch, tmp_path):
@@ -709,6 +744,7 @@ def test_export_always_forces_fresh_validation_not_a_stale_cache(window, monkeyp
     # so its cached metrics above go stale -- export must never read them.
     window.chain.update_params(block_id, fc=5000.0)
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
 
     window._on_export()
 

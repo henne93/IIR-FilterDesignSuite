@@ -18,6 +18,8 @@ this same helper for its own cursor line.
 
 from __future__ import annotations
 
+import math
+
 import matplotlib.collections as mcollections
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
@@ -31,6 +33,26 @@ CURSOR_COLOR = "#555555"
 
 PHASE_YLIM = (-180.0, 180.0)
 MAGNITUDE_YLIM_FLOOR = -100.0
+# Bottom bound is rounded down to this step for a clean axis edge -- see
+# _adaptive_magnitude_ylim() below. Sibling copy: python/export.py.
+MAGNITUDE_YLIM_STEP = 10.0
+
+
+def _adaptive_magnitude_ylim(data_bottom: float, data_top: float) -> tuple[float, float]:
+    """Bottom bound follows the data (rounded down to a clean
+    MAGNITUDE_YLIM_STEP multiple), capped at MAGNITUDE_YLIM_FLOOR so an
+    extreme notch/null can't drag the whole axis down and squash everything
+    else into a sliver at the top -- a filter with only small excursions
+    now gets a tighter, more legible axis instead of always spanning the
+    full -100 dB. The top bound is untouched: still exactly `max(data_top,
+    MAGNITUDE_YLIM_FLOOR)`, same as before this adaptive-bottom change.
+    Sibling copy: python/export.py's `_adaptive_magnitude_ylim()`.
+    """
+    top = max(data_top, MAGNITUDE_YLIM_FLOOR)
+    bottom = math.floor(max(data_bottom, MAGNITUDE_YLIM_FLOOR) / MAGNITUDE_YLIM_STEP) * MAGNITUDE_YLIM_STEP
+    if bottom >= top:
+        bottom = top - MAGNITUDE_YLIM_STEP
+    return bottom, top
 
 
 def draw_cursor_line(ax, freq_hz: float) -> mcollections.LineCollection:
@@ -114,8 +136,8 @@ class BodeWidget(QWidget):
             self.ax_phase.plot(q14.freq_hz, q14.phase_deg, color=Q14_COLOR, linestyle="--", label="Q14")
         self.ax_mag.relim()
         self.ax_mag.autoscale_view()
-        _, mag_top = self.ax_mag.get_ylim()
-        self.ax_mag.set_ylim(MAGNITUDE_YLIM_FLOOR, max(mag_top, MAGNITUDE_YLIM_FLOOR))
+        mag_bottom, mag_top = self.ax_mag.get_ylim()
+        self.ax_mag.set_ylim(*_adaptive_magnitude_ylim(mag_bottom, mag_top))
         self.ax_phase.relim()
         self.ax_phase.autoscale_view()
         self.ax_phase.set_ylim(*PHASE_YLIM)

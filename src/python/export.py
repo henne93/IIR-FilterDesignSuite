@@ -17,15 +17,19 @@ Produces a timestamped `export_YYYYMMDD_HHMMSS/` directory containing:
                              holding its configured bandwidth fixed, clamped
                              at the `[100, fc_max(fs)]` domain edges
                              (CONTRACTS.md §6.3) -- see `_sweep_design_at()`.
-- `firmware/`             -- a complete, self-contained C package (generated
-                             coefficients, `biquad_q14.{h,c}`,
-                             `filter_design_calc.{h,c}` -- the Q14
-                             design-function implementation, renamed to avoid
-                             colliding with the generated coefficient header
-                             below -- a generated cascade-wiring `example.c`,
-                             `README.md`) that a firmware integrator can copy
-                             into another project as-is (CONTRACTS.md §10).
-                             See `render_firmware_package()` below.
+- `firmware/`             -- a complete, self-contained C package that a
+                             firmware integrator can copy into another
+                             project as-is (CONTRACTS.md §10). Top level:
+                             generated coefficients (`filter_design.h`), a
+                             generated cascade-wiring `example.c`, and
+                             `README.md`. Nested under
+                             `firmware/biquad_q14/`: every filter *source*
+                             file -- `biquad_q14.{h,c}` and
+                             `filter_design_calc.{h,c}` (the Q14
+                             design-function implementation, renamed to
+                             avoid colliding with the generated coefficient
+                             header above). See `render_firmware_package()`
+                             below.
 
 The top-level `filter_design.h` above is deliberately coefficient-only, unchanged
 from the original design (CONCEPT.md §7's export file listing enumerates exactly
@@ -67,6 +71,7 @@ invalid disabled block never blocks export.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -116,6 +121,9 @@ Q14_COLOR = "#c0392b"
 
 PHASE_YLIM = (-180.0, 180.0)
 MAGNITUDE_YLIM_FLOOR = -100.0
+# Bottom bound is rounded down to this step for a clean axis edge -- see
+# _adaptive_magnitude_ylim() below. Sibling copy: ui/widgets/bode_widget.py.
+MAGNITUDE_YLIM_STEP = 10.0
 
 FILTER_KIND_NAMES: Mapping[BlockKind, str] = MappingProxyType(
     {
@@ -129,6 +137,16 @@ FILTER_KIND_NAMES: Mapping[BlockKind, str] = MappingProxyType(
 
 class ExportError(RuntimeError):
     """Export failed for a reason outside invalid chain state -- filesystem, plotting, or PDF generation."""
+
+    def __init__(self, message: str, output_dir: Path | None = None) -> None:
+        super().__init__(message)
+        # Best-effort pointer at the export directory in progress when this
+        # error was raised, so a caller (ui/app.py's error dialog) can show
+        # *where* the failed export was writing, not just what went wrong.
+        # `export_design()` back-fills this if it's still None once the
+        # error crosses its own try/except (most raise sites here have no
+        # reason to know the directory themselves).
+        self.output_dir = output_dir
 
 
 @dataclass(frozen=True)
@@ -368,10 +386,22 @@ def _write_header(path: Path, snapshot: ExportSnapshot) -> None:
 # `#include` line is repointed, nothing else), so a change to either real
 # implementation propagates to the next export automatically.
 #
+# Layout within firmware/: the two files an integrator actually touches --
+# the frozen-coefficient `filter_design.h` and the generated `example.c`
+# wiring up this specific chain -- sit at the top level, alongside
+# `README.md`. Every actual filter *source* file (the biquad implementation
+# and the Q14 design-function pair) is nested one level down, under
+# `firmware/FIRMWARE_FILTER_SOURCES_DIRNAME/`, so the top level stays to
+# just "what do I call" and "what do I read" rather than mixing those in
+# with "what compiles the DSP". `example.c`'s own `#include`s are the only
+# thing that need to know about that nesting (see render_firmware_example);
+# every file *inside* the subfolder still refers to its sibling by a bare
+# name, unaffected by where the subfolder itself sits.
+#
 # filter_design.{h,c} (the design-function pair: filter_design_lp/hp/bp/ap/pk())
 # are bundled here under the renamed `filter_design_calc.{h,c}` -- this
 # package already has a *generated coefficient* header also named
-# `filter_design.h` (below), so the real source pair can't keep its own name
+# `filter_design.h` (above), so the real source pair can't keep its own name
 # without colliding. Bundling these lets firmware recompute Q14 coefficients
 # at runtime (e.g. to retune a filter) instead of only ever loading the
 # frozen constants in `filter_design.h`; `tests/test_firmware_package.py`
@@ -382,6 +412,12 @@ def _write_header(path: Path, snapshot: ExportSnapshot) -> None:
 
 _DESIGN_INCLUDE_LINE = '#include "filter_design.h"'
 _DESIGN_CALC_HEADER_NAME = "filter_design_calc.h"
+
+# Subfolder (under firmware/) holding every filter *source* file -- the
+# biquad implementation and the Q14 design-function pair -- as opposed to
+# the generated coefficients / usage example / README at firmware/'s own
+# top level. See the module-section comment above.
+FIRMWARE_FILTER_SOURCES_DIRNAME = "biquad_q14"
 
 
 def render_standalone_biquad_header(src_dir: Path = C_SRC_DIR) -> str:
@@ -468,7 +504,13 @@ def render_firmware_example(snapshot: ExportSnapshot) -> str:
     rather than reading those defines directly, so firmware can recompute
     coefficients itself (e.g. to retune a filter) instead of only ever
     loading frozen constants. `main()` is an illustrative compile-and-run
-    demo only.
+    demo only. `example.c` itself sits at firmware/'s top level while the
+    two headers it includes live one level down, under
+    `FIRMWARE_FILTER_SOURCES_DIRNAME/` (see the firmware/ layout comment
+    above `render_firmware_package`) -- hence the subfolder-qualified
+    `#include` paths below; quoted includes resolve relative to the
+    including file's own directory, so no extra `-I` flag is needed to
+    compile this file.
     """
     lines = [
         "/* Generated by IIR Filter Design Suite -- example integration for the",
@@ -480,8 +522,8 @@ def render_firmware_example(snapshot: ExportSnapshot) -> str:
         " * than reading those defines directly. main() below is only a",
         " * compile-and-run demo. */",
         "",
-        '#include "filter_design_calc.h"',
-        '#include "biquad_q14.h"',
+        f'#include "{FIRMWARE_FILTER_SOURCES_DIRNAME}/{_DESIGN_CALC_HEADER_NAME}"',
+        f'#include "{FIRMWARE_FILTER_SOURCES_DIRNAME}/biquad_q14.h"',
         "#include <stdio.h>",
         "",
     ]
@@ -534,8 +576,23 @@ def render_firmware_readme(snapshot: ExportSnapshot) -> str:
         "\n"
         "## Contents\n"
         "\n"
+        "Top level -- the two files an integrator actually names/reads:\n"
+        "\n"
         "- `filter_design.h` -- generated Q14 coefficients for this design\n"
-        "  (`FILT<n>_*` defines). Same content as the sibling top-level file.\n"
+        "  (`FILT<n>_*` defines). Same content as the sibling top-level file\n"
+        "  one directory up (this suite's own export directory).\n"
+        "- `example.c` -- generated integration example: `filter_chain_init()`\n"
+        "  computes each stage's coefficients at runtime by calling this\n"
+        f"  design's own `filter_design_lp/hp/bp/ap/pk()` (from\n"
+        f"  `{FIRMWARE_FILTER_SOURCES_DIRNAME}/filter_design_calc.{{h,c}}` below)\n"
+        "  with its exported design parameters, then builds the cascade's\n"
+        "  state from the result; `process_chain(x)` runs one Q14 sample\n"
+        "  through the full series cascade and returns the result. `main()`\n"
+        "  is an illustrative demo only (feeds a unit impulse, prints the\n"
+        "  output) -- not part of the integration API.\n"
+        "\n"
+        f"`{FIRMWARE_FILTER_SOURCES_DIRNAME}/` -- every filter *source* file:\n"
+        "\n"
         "- `biquad_q14.h` / `biquad_q14.c` -- the Direct Form 1 Q14 biquad\n"
         "  implementation.\n"
         "- `filter_design_calc.h` / `filter_design_calc.c` -- the Q14\n"
@@ -545,22 +602,21 @@ def render_firmware_readme(snapshot: ExportSnapshot) -> str:
         "  Call these to recompute coefficients at runtime (e.g. to retune a\n"
         "  filter); the frozen constants in `filter_design.h` above are enough\n"
         "  if your design never changes after flashing.\n"
-        "- `example.c` -- generated integration example: `filter_chain_init()`\n"
-        "  computes each stage's coefficients at runtime by calling this\n"
-        "  design's own `filter_design_lp/hp/bp/ap/pk()` (from\n"
-        "  `filter_design_calc.{h,c}` above) with its exported design\n"
-        "  parameters, then builds the cascade's state from the result;\n"
-        "  `process_chain(x)` runs one Q14 sample through the full series\n"
-        "  cascade and returns the result. `main()` is an illustrative demo\n"
-        "  only (feeds a unit impulse, prints the output) -- not part of the\n"
-        "  integration API.\n"
         "\n"
         "## Integration\n"
         "\n"
         "1. Copy this folder into your firmware project.\n"
-        "2. Compile and link `biquad_q14.c`, `filter_design_calc.c`, and your\n"
+        f"2. Compile and link `{FIRMWARE_FILTER_SOURCES_DIRNAME}/biquad_q14.c`,\n"
+        f"   `{FIRMWARE_FILTER_SOURCES_DIRNAME}/filter_design_calc.c`, and your\n"
         "   integration source (`example.c`, or your own file once you've\n"
-        "   copied its pattern) together -- all three are required.\n"
+        "   copied its pattern) together -- all three are required. `example.c`'s\n"
+        f"   own `#include`s already point into `{FIRMWARE_FILTER_SOURCES_DIRNAME}/`,\n"
+        "   so no extra include path is needed as long as this folder's layout\n"
+        "   stays intact, e.g.:\n"
+        "   ```\n"
+        f"   cc example.c {FIRMWARE_FILTER_SOURCES_DIRNAME}/biquad_q14.c "
+        f"{FIRMWARE_FILTER_SOURCES_DIRNAME}/filter_design_calc.c -o demo -lm\n"
+        "   ```\n"
         "3. Call `filter_chain_init()` once at startup.\n"
         "4. Call `process_chain(x)` once per input sample in your real-time loop.\n"
         "5. Remove or replace `example.c`'s `main()` -- it's a compile-and-run\n"
@@ -570,26 +626,39 @@ def render_firmware_readme(snapshot: ExportSnapshot) -> str:
 
 def render_firmware_package(snapshot: ExportSnapshot, output_dir: Path, *, src_dir: Path = C_SRC_DIR) -> Path:
     """Writes the `firmware/` subfolder (see module docstring) under
-    `output_dir` and returns its path."""
+    `output_dir` and returns its path.
+
+    Layout: `filter_design.h`, `example.c`, and `README.md` sit at
+    `firmware/`'s own top level; every filter *source* file (the biquad
+    implementation and the Q14 design-function pair) is nested under
+    `firmware/FIRMWARE_FILTER_SOURCES_DIRNAME/` -- see the layout comment
+    above this module's firmware-package section.
+    """
     firmware_dir = output_dir / "firmware"
     try:
         firmware_dir.mkdir(parents=True, exist_ok=False)
     except OSError as exc:
         raise ExportError(f"failed to create firmware package directory {firmware_dir}: {exc}") from exc
 
+    sources_dir = firmware_dir / FIRMWARE_FILTER_SOURCES_DIRNAME
+    try:
+        sources_dir.mkdir(parents=False, exist_ok=False)
+    except OSError as exc:
+        raise ExportError(f"failed to create firmware filter-sources directory {sources_dir}: {exc}") from exc
+
     _write_text_lf(firmware_dir / "filter_design.h", render_header(snapshot))
-    _write_text_lf(firmware_dir / "biquad_q14.h", render_standalone_biquad_header(src_dir), encoding="utf-8")
+    _write_text_lf(sources_dir / "biquad_q14.h", render_standalone_biquad_header(src_dir), encoding="utf-8")
     try:
         biquad_c_text = (src_dir / "biquad_q14.c").read_text(encoding="utf-8")
     except OSError as exc:
         raise ExportError(f"failed to read {src_dir / 'biquad_q14.c'}: {exc}") from exc
-    _write_text_lf(firmware_dir / "biquad_q14.c", biquad_c_text, encoding="utf-8")
+    _write_text_lf(sources_dir / "biquad_q14.c", biquad_c_text, encoding="utf-8")
     try:
         design_h_text = (src_dir / "filter_design.h").read_text(encoding="utf-8")
     except OSError as exc:
         raise ExportError(f"failed to read {src_dir / 'filter_design.h'}: {exc}") from exc
-    _write_text_lf(firmware_dir / _DESIGN_CALC_HEADER_NAME, design_h_text, encoding="utf-8")
-    _write_text_lf(firmware_dir / "filter_design_calc.c", render_firmware_design_calc_source(src_dir), encoding="utf-8")
+    _write_text_lf(sources_dir / _DESIGN_CALC_HEADER_NAME, design_h_text, encoding="utf-8")
+    _write_text_lf(sources_dir / "filter_design_calc.c", render_firmware_design_calc_source(src_dir), encoding="utf-8")
     _write_text_lf(firmware_dir / "example.c", render_firmware_example(snapshot), encoding="utf-8")
     _write_text_lf(firmware_dir / "README.md", render_firmware_readme(snapshot), encoding="utf-8")
 
@@ -597,6 +666,23 @@ def render_firmware_package(snapshot: ExportSnapshot, output_dir: Path, *, src_d
 
 
 # -- PNG plots -----------------------------------------------------------------
+
+
+def _adaptive_magnitude_ylim(data_bottom: float, data_top: float) -> tuple[float, float]:
+    """Bottom bound follows the data (rounded down to a clean
+    MAGNITUDE_YLIM_STEP multiple), capped at MAGNITUDE_YLIM_FLOOR so an
+    extreme notch/null can't drag the whole axis down and squash everything
+    else into a sliver at the top -- a filter with only small excursions
+    now gets a tighter, more legible axis instead of always spanning the
+    full -100 dB. The top bound is untouched: still exactly `max(data_top,
+    MAGNITUDE_YLIM_FLOOR)`, same as before this adaptive-bottom change.
+    Sibling copy: ui/widgets/bode_widget.py's `_adaptive_magnitude_ylim()`.
+    """
+    top = max(data_top, MAGNITUDE_YLIM_FLOOR)
+    bottom = math.floor(max(data_bottom, MAGNITUDE_YLIM_FLOOR) / MAGNITUDE_YLIM_STEP) * MAGNITUDE_YLIM_STEP
+    if bottom >= top:
+        bottom = top - MAGNITUDE_YLIM_STEP
+    return bottom, top
 
 
 def _save_bode_png(path: Path, ideal, q14, title: str) -> None:
@@ -611,8 +697,8 @@ def _save_bode_png(path: Path, ideal, q14, title: str) -> None:
     ax_mag.set_title(title)
     ax_mag.grid(True, which="both", alpha=0.3)
     ax_mag.legend(loc="best", fontsize="small")
-    _, mag_top = ax_mag.get_ylim()
-    ax_mag.set_ylim(MAGNITUDE_YLIM_FLOOR, max(mag_top, MAGNITUDE_YLIM_FLOOR))
+    mag_bottom, mag_top = ax_mag.get_ylim()
+    ax_mag.set_ylim(*_adaptive_magnitude_ylim(mag_bottom, mag_top))
 
     ax_phase.set_xscale("log")
     ax_phase.plot(ideal.freq_hz, ideal.phase_deg, color=IDEAL_COLOR, label="Ideal")
@@ -679,6 +765,16 @@ def render_pdf(
 ) -> None:
     styles = getSampleStyleSheet()
     code_style = ParagraphStyle("Code", parent=styles["Normal"], fontName="Courier", fontSize=6.5, leading=8)
+    # `keepWithNext` is reportlab's own flowable-engine mechanism for "never
+    # let a page break fall right after this flowable" -- the doctemplate
+    # bundles a keepWithNext flowable with whatever comes immediately after
+    # it into an internal KeepTogether at render time (doctemplate.py's
+    # handle_keepWithNext()), so a sub-chapter heading is never orphaned
+    # alone at the bottom of a page with its content starting on the next.
+    # Used (instead of wrapping each section's story items in an explicit
+    # KeepTogether) specifically so the flat story list -- and the existing
+    # PageBreak-adjacency tests that walk it -- is unaffected.
+    heading_style = ParagraphStyle("Heading2KeepNext", parent=styles["Heading2"], keepWithNext=1)
     story = []
 
     # 1. Design summary
@@ -696,7 +792,7 @@ def render_pdf(
     # next page.
     for block in snapshot.blocks:
         story.append(PageBreak())
-        story.append(Paragraph(f"{block.name}: {FILTER_KIND_NAMES[block.kind]}", styles["Heading2"]))
+        story.append(Paragraph(f"{block.name}: {FILTER_KIND_NAMES[block.kind]}", heading_style))
         story.append(Paragraph(_filter_description(block), styles["Normal"]))
 
         png = block_bode_pngs.get(block.position)
@@ -737,7 +833,7 @@ def render_pdf(
     # (a block with a long coefficient-sweep note can still spill onto the
     # next page; this is a page-count floor, not a one-page cap).
     story.append(PageBreak())
-    story.append(Paragraph("Combined chain", styles["Heading2"]))
+    story.append(Paragraph("Combined chain", heading_style))
     if combined_bode_png.is_file():
         story.append(Image(str(combined_bode_png), width=5.0 * inch, height=3.75 * inch))
     story.append(
@@ -750,15 +846,17 @@ def render_pdf(
     )
     story.append(Spacer(1, 12))
 
-    # 4. C header listing
-    story.append(Paragraph("C header listing (filter_design.h)", styles["Heading2"]))
+    # 4. C header listing -- no leading PageBreak (unlike sections 2/3 above),
+    # so without keepWithNext this heading could land alone at the bottom of
+    # the Combined-chain page with the listing itself starting on the next.
+    story.append(Paragraph("C header listing (filter_design.h)", heading_style))
     for line in render_header(snapshot).splitlines():
         escaped = line.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace(" ", "&nbsp;")
         story.append(Paragraph(escaped or "&nbsp;", code_style))
     story.append(Spacer(1, 12))
 
-    # 5. Test results
-    story.append(Paragraph("Test results", styles["Heading2"]))
+    # 5. Test results -- same no-leading-PageBreak situation as section 4.
+    story.append(Paragraph("Test results", heading_style))
     result_data = [["Block", "Kind", "Max error (dB)", "Result"]]
     for block in snapshot.blocks:
         result_data.append(
@@ -843,39 +941,48 @@ def export_design(
     output_root = Path(output_root)
     export_dir = _make_export_dir(output_root, snapshot.generated_at)
 
-    freq = bode_grid(snapshot.fs)
+    try:
+        freq = bode_grid(snapshot.fs)
 
-    combined_ideal = chain.combined_ideal_response(freq)
-    combined_q14 = chain.combined_q14_response(freq, backend)
-    combined_png = export_dir / "bode_combined.png"
-    _save_bode_png(combined_png, combined_ideal, combined_q14, "Combined chain")
+        combined_ideal = chain.combined_ideal_response(freq)
+        combined_q14 = chain.combined_q14_response(freq, backend)
+        combined_png = export_dir / "bode_combined.png"
+        _save_bode_png(combined_png, combined_ideal, combined_q14, "Combined chain")
 
-    block_pngs: dict[int, Path] = {}
-    sweep_pngs: dict[int, Path] = {}
-    for block, block_snap in zip(_active_blocks(chain), snapshot.blocks):
-        filt = block.filter
-        ideal_resp = filt.ideal_response(freq)
-        q14_resp = filt.q14_response(freq, backend)
-        png_path = export_dir / f"bode_{block.kind.lower()}_{block_snap.position}.png"
-        _save_bode_png(png_path, ideal_resp, q14_resp, f"{block_snap.name}: {FILTER_KIND_NAMES[block.kind]}")
-        block_pngs[block_snap.position] = png_path
+        block_pngs: dict[int, Path] = {}
+        sweep_pngs: dict[int, Path] = {}
+        for block, block_snap in zip(_active_blocks(chain), snapshot.blocks):
+            filt = block.filter
+            ideal_resp = filt.ideal_response(freq)
+            q14_resp = filt.q14_response(freq, backend)
+            png_path = export_dir / f"bode_{block.kind.lower()}_{block_snap.position}.png"
+            _save_bode_png(png_path, ideal_resp, q14_resp, f"{block_snap.name}: {FILTER_KIND_NAMES[block.kind]}")
+            block_pngs[block_snap.position] = png_path
 
-        design_at = _sweep_design_at(block, chain.fs)
-        if design_at is not None:
-            sweep_path = export_dir / f"error_sweep_{block_snap.position}.png"
-            curve_freq, curve_err = _coefficient_sweep_curve(chain.fs, design_at, backend)
-            _save_error_sweep_png(
-                sweep_path, curve_freq, curve_err, f"{block_snap.name}: {block.kind} coefficient error sweep"
-            )
-            sweep_pngs[block_snap.position] = sweep_path
+            design_at = _sweep_design_at(block, chain.fs)
+            if design_at is not None:
+                sweep_path = export_dir / f"error_sweep_{block_snap.position}.png"
+                curve_freq, curve_err = _coefficient_sweep_curve(chain.fs, design_at, backend)
+                _save_error_sweep_png(
+                    sweep_path, curve_freq, curve_err, f"{block_snap.name}: {block.kind} coefficient error sweep"
+                )
+                sweep_pngs[block_snap.position] = sweep_path
 
-    header_path = export_dir / "filter_design.h"
-    _write_header(header_path, snapshot)
+        header_path = export_dir / "filter_design.h"
+        _write_header(header_path, snapshot)
 
-    firmware_dir = render_firmware_package(snapshot, export_dir)
+        firmware_dir = render_firmware_package(snapshot, export_dir)
 
-    pdf_path = export_dir / "report.pdf"
-    render_pdf(snapshot, pdf_path, combined_png, block_pngs)
+        pdf_path = export_dir / "report.pdf"
+        render_pdf(snapshot, pdf_path, combined_png, block_pngs)
+    except ExportError as exc:
+        # Most raise sites above already know their own path (e.g. "failed
+        # to write {path}"), but not the overall export directory -- fill it
+        # in here so a caller can point the user at where the export was
+        # writing, even for an error raised deep in a helper.
+        if exc.output_dir is None:
+            exc.output_dir = export_dir
+        raise
 
     return ExportResult(
         output_dir=export_dir,

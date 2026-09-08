@@ -578,7 +578,7 @@ one); the Q14 design-function implementation itself
 (`filter_design_lp/hp/bp/ap/pk()`), copied verbatim from `src/c/filter_design.{h,c}`
 but renamed to `filter_design_calc.{h,c}` -- the rename is the only change,
 forced by the naming collision with the generated coefficient header sitting
-right next to it, which keeps the `filter_design.h` name; a `biquad_q14.h`
+in the same package, which keeps the `filter_design.h` name; a `biquad_q14.h`
 variant whose `#include "filter_design.h"` line is repointed at the bundled
 `filter_design_calc.h` (same collision, same fix) instead of pulling in the
 generated coefficient header; a byte-for-byte verbatim copy of
@@ -612,6 +612,26 @@ coefficients bit-exactly against `NativeBackend.design_lp/hp/bp/ap/pk()` --
 which is itself the same source, compiled unrenamed, and validated against
 the Python/scipy "ideal" coefficients across the full parameter domain by
 `tests/test_native_coefficients.py` (§4/§6/§11). See README.md §6.
+
+**Internal layout of `firmware/`:** only the two files an integrator
+actually names or reads directly sit at `firmware/`'s own top level --
+`filter_design.h` (the frozen coefficients) and the generated `example.c`
+(the usage/integration example) -- alongside `README.md`. Every actual
+filter *source* file is nested one level down, under `firmware/biquad_q14/`:
+`biquad_q14.{h,c}` and the renamed `filter_design_calc.{h,c}`. This groups
+"all the DSP/design C source" together, separate from the two files meant
+for direct consumption. `example.c`'s own `#include`s are the only thing
+that need to know about the nesting (`#include
+"biquad_q14/filter_design_calc.h"`, `#include "biquad_q14/biquad_q14.h"`);
+every file *inside* `biquad_q14/` still refers to its sibling by a bare
+name (e.g. `biquad_q14.h`'s own `#include "filter_design_calc.h"`),
+unaffected by where the subfolder itself sits. No extra `-I` flag is
+required to compile any of it -- quoted includes resolve relative to the
+including file's own directory first, so `example.c`'s subfolder-qualified
+includes and each `biquad_q14/*.c`/`*.h` file's bare sibling includes both
+resolve correctly compiled from `firmware/`'s own directory, exactly as
+`tests/test_firmware_package.py` and its generated `README.md` (§6 above)
+demonstrate.
 
 ---
 
@@ -851,3 +871,10 @@ Added after v1's initial "no persistence" decision (§13) was reversed.
     demonstrating the runtime-recompute path, e.g. for retuning a filter, while
     `filter_design.h`'s frozen defines remain available for a design that never
     changes after flashing.
+14. **Export's `firmware/` subfolder now nests every filter *source* file under
+    a `firmware/biquad_q14/` subdirectory** -- `biquad_q14.{h,c}` and
+    `filter_design_calc.{h,c}` move down one level; `filter_design.h`,
+    `example.c`, and `README.md` stay at `firmware/`'s own top level. Purely a
+    layout change (§10): no file's *content* changed beyond `example.c`'s own
+    `#include` paths gaining the `biquad_q14/` prefix they need to still find
+    their headers.

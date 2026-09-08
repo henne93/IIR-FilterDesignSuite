@@ -18,7 +18,7 @@ from dataclasses import astuple
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from export import export_design
+from export import FIRMWARE_FILTER_SOURCES_DIRNAME, export_design
 from filters import FilterChain
 
 FS = 13333.0
@@ -37,7 +37,7 @@ _DESIGN_GAIN_DB = 6.0
 
 _DESIGN_HARNESS_C = """\
 #include <stdio.h>
-#include "filter_design_calc.h"
+#include "{sources_dir}/filter_design_calc.h"
 
 static void print_coeffs(const q14_coeffs_t *c) {{
     printf("%d %d %d %d %d\\n", c->b0, c->b1, c->b2, c->a1, c->a2);
@@ -52,7 +52,15 @@ int main(void) {{
     filter_design_pk({fc!r}, {fs!r}, {q!r}, {gain_db!r}, &c); print_coeffs(&c);
     return 0;
 }}
-""".format(fc=_DESIGN_FC, fs=FS, f_low=_DESIGN_F_LOW, f_high=_DESIGN_F_HIGH, q=_DESIGN_Q, gain_db=_DESIGN_GAIN_DB)
+""".format(
+    fc=_DESIGN_FC,
+    fs=FS,
+    f_low=_DESIGN_F_LOW,
+    f_high=_DESIGN_F_HIGH,
+    q=_DESIGN_Q,
+    gain_db=_DESIGN_GAIN_DB,
+    sources_dir=FIRMWARE_FILTER_SOURCES_DIRNAME,
+)
 
 
 def _build_and_run_detached_copy(tmp_path: Path, firmware_dir: Path) -> list[int]:
@@ -61,12 +69,13 @@ def _build_and_run_detached_copy(tmp_path: Path, firmware_dir: Path) -> list[int
     the actual "drop this folder into a project elsewhere" scenario."""
     detached = tmp_path / "detached_elsewhere" / "firmware"
     shutil.copytree(firmware_dir, detached)
+    sources_dir = detached / FIRMWARE_FILTER_SOURCES_DIRNAME
 
     binary = detached / "demo"
     compile_cmd = [
         "gcc", "-Wall", "-Wextra", "-Werror", "-std=c11",
         "-I", str(detached),  # the ONLY include path -- no src/c/ anywhere
-        str(detached / "example.c"), str(detached / "biquad_q14.c"), str(detached / "filter_design_calc.c"),
+        str(detached / "example.c"), str(sources_dir / "biquad_q14.c"), str(sources_dir / "filter_design_calc.c"),
         "-o", str(binary), "-lm",
     ]
     compile_proc = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=30)
@@ -120,14 +129,18 @@ def test_generated_firmware_package_design_functions_match_native_backend(tmp_pa
 
     detached = tmp_path / "detached_design_calc" / "firmware"
     shutil.copytree(result.firmware_dir, detached)
+    sources_dir = detached / FIRMWARE_FILTER_SOURCES_DIRNAME
 
+    # design_harness.c sits at the detached copy's top level (same as the
+    # real example.c), so its #include of filter_design_calc.h is
+    # subfolder-qualified, matching _DESIGN_HARNESS_C's own formatting above.
     harness_src = detached / "design_harness.c"
     harness_src.write_text(_DESIGN_HARNESS_C)
     binary = detached / "design_harness"
     compile_cmd = [
         "gcc", "-Wall", "-Wextra", "-Werror", "-std=c11",
         "-I", str(detached),  # the ONLY include path -- no src/c/ anywhere
-        str(harness_src), str(detached / "filter_design_calc.c"),
+        str(harness_src), str(sources_dir / "filter_design_calc.c"),
         "-o", str(binary), "-lm",
     ]
     compile_proc = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=30)

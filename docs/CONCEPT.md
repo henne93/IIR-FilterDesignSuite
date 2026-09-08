@@ -321,10 +321,13 @@ standalone without the firmware consumer having to define anything first
 
 Every export also writes a `firmware/` subfolder — a complete, self-contained
 drop-in package for an external firmware project, needing no other file from
-this repository: the same `filter_design.h`, a standalone `biquad_q14.h`/`.c`
-pair, a generated `example.c` wiring the exported chain's blocks in series,
-and a `README.md` with integration instructions. See README.md §6 for details
-and how it's verified to actually compile and run standalone.
+this repository: the same `filter_design.h` and a generated `example.c`
+wiring the exported chain's blocks in series sit at `firmware/`'s own top
+level, alongside a `README.md` with integration instructions; every actual
+filter source file — the standalone `biquad_q14.h`/`.c` pair and the
+Q14 design-function implementation — is nested under `firmware/biquad_q14/`.
+See README.md §6 for details and how it's verified to actually compile and
+run standalone.
 
 ---
 

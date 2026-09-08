@@ -327,6 +327,9 @@ class MainWindow(QMainWindow):
         refuses to proceed past -- an empty chain or any invalid block --
         both reported here rather than left as a traceback. Filesystem/
         plotting/PDF failures surface as `ExportError`, also reported here.
+        Both error dialogs include the relevant path (the export directory
+        if one is known, otherwise the destination folder the user picked).
+        On success, a confirmation dialog reports the export directory too.
         """
         if self.backend is None:
             QMessageBox.critical(
@@ -344,9 +347,17 @@ class MainWindow(QMainWindow):
         try:
             result = export_design(self.chain, self.backend, output_root)
         except (ValueError, ExportError) as exc:
-            QMessageBox.critical(self, "Export failed", str(exc))
+            # ExportError may know the specific export directory it failed
+            # inside (see export.ExportError/export_design); a plain
+            # ValueError (invalid chain) never got that far, so falls back
+            # to the destination folder the user picked.
+            location = getattr(exc, "output_dir", None) or Path(output_root)
+            QMessageBox.critical(self, "Export failed", f"{exc}\n\nLocation: {location}")
             return
 
+        QMessageBox.information(
+            self, "Export successful", f"Export completed successfully.\n\nLocation: {result.output_dir}"
+        )
         self.statusBar().showMessage(f"Exported to {result.output_dir}", 5000)
 
     # -- reset ------------------------------------------------------------
