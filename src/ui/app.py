@@ -38,14 +38,17 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QDoubleValidator
 from PyQt6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QScrollArea,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -57,6 +60,7 @@ from project_file import PROJECT_FILE_EXTENSION, ProjectFileError, load_project,
 from ui.canvas import FilterCanvas
 from ui.inspector import Inspector
 from ui.palette import FilterPalette
+from ui.time_domain_view import TimeDomainView
 
 DEFAULT_FS_HZ = 13_333.0
 
@@ -145,8 +149,8 @@ class MainWindow(QMainWindow):
     # -- layout ---------------------------------------------------------
 
     def _build_central_widget(self) -> None:
-        central = QWidget()
-        outer = QVBoxLayout(central)
+        design_view = QWidget()
+        outer = QVBoxLayout(design_view)
 
         fs_row = QHBoxLayout()
         fs_row.addWidget(QLabel("Sample rate fs (Hz):"))
@@ -175,7 +179,36 @@ class MainWindow(QMainWindow):
         self.splitter.setSizes([160, 220, 520])
         outer.addWidget(self.splitter, 1)
 
-        self.setCentralWidget(central)
+        # Second top-level view (docs/CONCEPT.md §11.7): swaps the whole
+        # central widget rather than adding a 4th panel to the Design view.
+        self.time_domain_view = TimeDomainView(self.chain)
+
+        self.view_stack = QStackedWidget()
+        self.view_stack.addWidget(design_view)
+        self.view_stack.addWidget(self.time_domain_view)
+        self.setCentralWidget(self.view_stack)
+        self._build_view_switch()
+
+    def _build_view_switch(self) -> None:
+        """Design/Time Domain toggle, docked in the menu bar's corner (CONCEPT.md §11.7 mockup)."""
+        switch = QWidget()
+        switch_layout = QHBoxLayout(switch)
+        switch_layout.setContentsMargins(0, 0, 8, 0)
+
+        self.design_view_button = QPushButton("Design")
+        self.time_domain_view_button = QPushButton("Time Domain")
+        for button in (self.design_view_button, self.time_domain_view_button):
+            button.setCheckable(True)
+            switch_layout.addWidget(button)
+
+        self.view_switch_group = QButtonGroup(self)
+        self.view_switch_group.setExclusive(True)
+        self.view_switch_group.addButton(self.design_view_button, 0)
+        self.view_switch_group.addButton(self.time_domain_view_button, 1)
+        self.design_view_button.setChecked(True)
+        self.view_switch_group.idClicked.connect(self.view_stack.setCurrentIndex)
+
+        self.menuBar().setCornerWidget(switch)
 
     def _build_actions(self) -> None:
         self.open_action = QAction("Open", self)
@@ -239,6 +272,7 @@ class MainWindow(QMainWindow):
         self.fs_error_label.setVisible(False)
         self.canvas.refresh()
         self.inspector.refresh()
+        self.time_domain_view.refresh_fs()
         self._on_chain_changed()
 
     # -- Project file (save/open, CONTRACTS.md §15) --------------------------
@@ -313,6 +347,7 @@ class MainWindow(QMainWindow):
         self.fs_error_label.setVisible(False)
         self.canvas.refresh()
         self.inspector.refresh()
+        self.time_domain_view.refresh_fs()
         self._on_chain_changed()
         self.statusBar().showMessage(f"Opened {path_str}", 5000)
 
@@ -380,6 +415,7 @@ class MainWindow(QMainWindow):
         self.fs_error_label.setVisible(False)
         self.canvas.refresh()
         self.inspector.refresh()
+        self.time_domain_view.refresh_fs()
         self._on_chain_changed()
 
     # -- close / dirty warning -----------------------------------------------
