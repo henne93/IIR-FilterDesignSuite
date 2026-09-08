@@ -414,3 +414,164 @@ cut (§8, §10) — see CONTRACTS.md §13/§15 for the format and UI rules.
 | Fixed Bode y-axes | Phase locked to ±180°, magnitude floor locked to −100 dB, in both the GUI and exported plots |
 | File/Edit menu bar | Replaced the original toolbar sketch; Open/Save/Save As/Export under File, Clear/Reset under Edit |
 | Peak (PK) filter type | Parametric bell EQ, a 5th block type (§2), including its own coefficient-domain int16-headroom analysis |
+
+---
+
+## 11. Time-Domain View (Feature Extension)
+
+**Status:** Concept — in development on branch `feature/time-domain-view`.
+
+### 11.1 Goal
+
+Alongside the frequency-domain Bode view, let the user see the filter chain's
+effect on an actual time-domain signal: a user-built source signal, filtered
+through the chain both ways (ideal float and Q14 fixed-point), plotted
+together. This answers "what does this filter actually do to a signal" in a
+way a Bode plot cannot.
+
+### 11.2 Signal Generator
+
+The source signal is assembled from **additive building blocks**, analogous
+in spirit to the filter chain but summed rather than cascaded (order does not
+matter for a sum):
+
+| Block | Parameters | Notes |
+|-------|-----------|-------|
+| **Sine** | frequency [Hz], amplitude, phase | Amplitude is normalized (§11.4) |
+| **DC** | value | Constant offset, tests DC handling |
+| **Noise** | amplitude (AWGN, additive white Gaussian) | Just another block — no special "clean vs. noisy" distinction; see below |
+| **CSV Import** | file (time [s], value columns) | Resampled to the global `fs` (§11.3); raw file values are not assumed pre-normalized, hence the `factor` below |
+
+Every block, regardless of type, additionally has a **`factor`** parameter
+(default `1.0`) that multiplies its raw output before summation — a uniform
+gain knob independent of the block's own amplitude/value/DC field. This
+matters most for **CSV Import**, which has no native "amplitude" parameter
+of its own (its values come straight from the file, in whatever units it was
+recorded in) — `factor` is the only way to scale it into range. For the
+other block types it's a convenience on top of their own amplitude field
+(e.g. quickly halve a Sine's contribution without recomputing its amplitude).
+Effective contribution of a block = `factor × (its own signal)`.
+
+Any number of blocks (including multiple of the same type, e.g. two Sine
+blocks at different frequencies) can be added; the **source signal is their
+sum**. There is deliberately **no separate "original" vs. "noisy" signal** —
+noise is just one more addable block, and the plot shows exactly one source
+signal (whatever blocks the user assembled, noise included or not) alongside
+the filtered results. This is a deliberate simplification agreed with the
+user: distinguishing "clean" and "noisy" would require tagging blocks as
+noise-vs-not and computing two source curves, which adds UI complexity the
+user explicitly decided is unnecessary — the filtered-vs-source comparison
+already shows the filter's effect.
+
+### 11.3 Sample Rate & Duration
+
+- Reuses the chain's existing global `fs` (same value shown at the top of the
+  Design view) — there is exactly one `fs` in the app, so the time-domain
+  signal is generated and filtered at that rate, guaranteeing consistency
+  with the filter design.
+- A **duration** field (ms, default 50 ms) controls the plotted window;
+  sample count = `round(duration_ms / 1000 * fs)`.
+- CSV import: two columns, time [s] and value. Values are linearly
+  interpolated onto the uniform `fs` grid over the plotted duration (i.e.
+  resampled to fit the global `fs`, not assumed to already match it).
+
+### 11.4 Amplitude Convention & Q14 Scaling
+
+Sine/DC/Noise amplitudes and CSV values are **normalized floats**, `-1.0` to
+`+1.0` representing full scale, further scaled per-block by that block's
+`factor` (§11.2). This keeps signal-block configuration unitless and
+intuitive.
+
+Note this is a *sample* scaling, distinct from the existing Q14
+*coefficient* scaling (`× 16384`, §5) — `biquad_q14_process()` takes/returns
+plain `int16_t` samples (§11.5), so the source signal must be mapped from
+the normalized float domain to int16 counts before the Q14 path, and mapped
+back for plotting.
+
+That mapping is **user-configurable**, not a fixed `× 32767`: a **"Full-scale
+reference"** control (int16 counts per normalized `1.0`, default `32767`)
+sits alongside the duration/`fs` controls in the Inspector. Lowering it below
+`32767` leaves headroom and lets the user deliberately explore/demonstrate
+Q14 quantization and saturation behavior (e.g. a signal that's supposed to
+represent a real ADC/DAC full-scale narrower than the int16 range); raising
+it (up to `32767`, the hard int16 ceiling) uses the full available dynamic
+range. The same reference value scales the Q14 output back down to the
+normalized float axis for plotting, so source, ideal-filtered, and
+Q14-filtered curves stay on one shared, comparable axis regardless of the
+chosen full-scale reference. Exact clipping/rounding rules at this mapping
+step are an implementation contract, to be pinned down in CONTRACTS.md
+alongside the existing Q14 coefficient rules.
+
+### 11.5 Filtering
+
+Two filtered curves are computed from the same source signal, mirroring the
+Ideal-vs-Q14 pairing already used for Bode/coefficients:
+
+- **Ideal**: cascade each block's `ideal_coefficients()` (float `b`/`a`) in
+  series over the source signal (scipy `lfilter`/`sosfilt`).
+- **Q14**: cascade each block's Q14 coefficients using the existing
+  `NativeBackend.process_samples()` C path (§3, `c_codegen.py`) — the output
+  int16 stream of one block feeds the next block's input, matching how the
+  cascade runs on the target firmware.
+
+### 11.6 Scope: Combined + Per-Block
+
+Like the Bode Inspector, the time-domain Inspector has a tab strip:
+**"Combined"** (whole chain) plus **one tab per filter block**, so the user
+can inspect the time-domain effect of an individual block as well as the
+full cascade — consistent with the rest of the suite rather than a
+combined-only special case.
+
+### 11.7 UI: A Second Top-Level View
+
+The app gains a top-level **view switch** (Design / Time Domain) that swaps
+the entire central widget, rather than adding a 4th panel squeezed into the
+existing 3-panel Design layout. The Time-Domain view **mirrors the existing
+3-panel pattern**:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  File   Edit          [ Design | Time Domain ]     IIR Filter Design Suite   │
+├────────────┬───────────────────────────────────┬────────────────────────────┤
+│  PALETTE   │      SIGNAL CANVAS                │       INSPECTOR            │
+│ (signal    │                                    │                            │
+│  blocks)   │  ┌─────┐  ┌─────┐  ┌─────┐        │  [Combined] [LP@3k] [HP]   │
+│ ┌────────┐ │  │ Sine│  │ DC  │  │Noise│  Σ →   │  ┌── Time domain ────────┐ │
+│ │  Sine  │ │  │1kHz │  │ 0.0 │  │0.05 │        │  │  Source               │ │
+│ └────────┘ │  └─────┘  └─────┘  └─────┘        │  │  ~~~Ideal filtered    │ │
+│ ┌────────┐ │                                    │  │  ---Q14 filtered      │ │
+│ │  DC    │ │  drop signal blocks here            │  └───────────────────────┘ │
+│ └────────┘ │  (summed, order doesn't matter)     │  duration: [ 50] ms        │
+│ ┌────────┐ │                                    │  fs: 13333 Hz (from Design)│
+│ │ Noise  │ │                                    │  Q14 full-scale: [32767]   │
+│ └────────┘ │                                    │                            │
+│ ┌────────┐ │                                    │                            │
+│ │  CSV   │ │                                    │                            │
+│ └────────┘ │                                    │                            │
+└────────────┴───────────────────────────────────┴────────────────────────────┘
+```
+
+- **Palette (left)**: draggable signal-block buttons — Sine, DC, Noise, CSV
+  Import — same drag-to-instantiate interaction as the filter palette. Each
+  instantiated block also gets the common `factor` field (§11.2) alongside
+  its own parameters.
+- **Signal Canvas (center)**: dropped blocks shown as a flat, unordered
+  collection feeding a sum (Σ) — no series connectors, since summation order
+  doesn't matter (unlike the filter chain's series canvas). Blocks are
+  selectable (to edit parameters) and deletable, same as filter blocks.
+- **Inspector (right)**: tab strip (Combined + per-block), time-domain plot
+  (source / ideal-filtered / Q14-filtered), duration field, read-only `fs`
+  echoed from the Design view, and the Q14 full-scale reference (§11.4).
+- The chain of **filter** blocks itself is unchanged and still edited only in
+  the Design view; the Time-Domain view consumes it read-only via the same
+  `FilterChain` model.
+
+### 11.8 Out of Scope (this feature)
+
+- Real-time / streaming audio playback of source or filtered signal
+- Per-sample interactive scrubbing beyond the existing hover-cursor pattern
+- Exporting time-domain plots/data as part of File ▸ Export (may follow
+  later, not part of this iteration)
+- Noise/signal-block parameters participating in the `.iirfilt` project file
+  (persistence of the signal chain) — TBD, likely a later iteration once the
+  core view works
