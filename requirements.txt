@@ -6,3 +6,4 @@ reportlab>=4.0
 
 # Test suite (README.md §5)
 pytest>=7.0
+pytest-xdist>=3.0
