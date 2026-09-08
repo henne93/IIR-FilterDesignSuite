@@ -583,19 +583,30 @@ export_YYYYMMDD_HHMMSS/
     ├── figures/
     │   ├── bode_combined.png
     │   ├── bode_<kind>_<n>.png
-    │   └── error_sweep_<n>.png         (moved from the export root; no content change)
+    │   ├── error_sweep_<n>.png         (moved from the export root; no content change)
+    │   ├── time_domain_combined.png    optional -- see "Time-domain export artifacts" below
+    │   └── time_domain_<kind>_<n>.png  optional, same numbering as bode_<kind>_<n>.png
+    ├── data/
+    │   ├── time_domain_combined.csv    optional, same condition as the PNGs above
+    │   └── time_domain_<kind>_<n>.csv  optional, same numbering
     └── test/
         └── test_summary.txt            C compile+run validation result (see below)
 ```
 
 `design.iirfilt` is written unconditionally, every export, via
-`project_file.save_project(chain, path)` -- a fixed filename (`PROJECT_FILENAME`
-in `export.py`, built from `project_file.PROJECT_FILE_EXTENSION` rather than
-hardcoding `.iirfilt` a second time), independent of whatever project file the
-user separately has open via File ▸ Save/Save As, so this export directory
-round-trips to exactly the chain state that was exported. It captures the
-*full* chain (including disabled/invalid blocks, per §15), not just the
-active blocks the rest of the export covers.
+`project_file.save_project(chain, path, signal_chain)` -- a fixed filename
+(`PROJECT_FILENAME` in `export.py`, built from
+`project_file.PROJECT_FILE_EXTENSION` rather than hardcoding `.iirfilt` a
+second time), independent of whatever project file the user separately has
+open via File ▸ Save/Save As, so this export directory round-trips to exactly
+the chain state that was exported. It captures the *full* `FilterChain`
+(including disabled/invalid blocks, per §15), not just the active blocks the
+rest of the export covers -- and, since the Time-Domain export addendum
+below, the *full* `SignalChain` the same way (every signal block, valid or
+not, per §15's schema v2 scope) when `export_design()` was given one;
+omitting `signal_chain` (as `export.py`'s own internal call site did before
+that addendum, and any caller with no `SignalChain` of its own still can)
+writes a well-formed file with an empty `signals` list, never a missing key.
 
 The old top-level, coefficient-only `filter_design.h` is gone: `source/biquad_q14/gen/filter_design.h`
 is now the only copy of the generated header anywhere in the export. The
@@ -702,6 +713,47 @@ and a last-resort catch-all around the whole step guards against a bug in
 the validation logic itself doing the same. `export_design()` still writes
 every other file even if this step finds real problems (or can't run at
 all, e.g. no `gcc` on `PATH`).
+
+**Time-domain export artifacts (NEW -- reverses CONCEPT.md §11.8's original
+"exporting time-domain plots/data" exclusion):** `export_design()` gained
+three optional keyword parameters -- `signal_chain: SignalChain | None`,
+`time_domain_duration_ms: float | None`, `time_domain_full_scale: int | None`
+(all default `None`) -- wired from `ui/app.py`'s `_on_export()` to the
+Time-Domain view's own `SignalChain` and its Inspector's *current*
+`duration_ms()`/`full_scale()` field values (CONCEPT.md §11.4), not a fixed
+export-only default: unlike the Bode sweep grid (`bode_grid(fs)`, unrelated
+to any UI zoom/setting), duration and full-scale are the user's own
+deliberate, already-exposed exploration settings, so export reflects exactly
+what the Time-Domain Inspector currently shows.
+
+For each of `Combined` + one per *active* filter block (same
+`_active_blocks()`/`FILT<n>` numbering as `bode_<kind>_<n>.png`,
+`time_domain.compute()` fed `chain.valid_filters` for Combined or
+`[block.filter]` for a single block), this writes a PNG plot
+(`reports/figures/time_domain_combined.png` /
+`time_domain_<kind>_<n>.png`) and a CSV
+(`reports/data/time_domain_combined.csv` / `time_domain_<kind>_<n>.csv`,
+header row `time_ms,source,ideal,q14`, one row per sample, LF-only UTF-8
+same as the generated header/project file). `q14` is never blank/omitted in
+the CSV -- export always requires a `NativeBackend` (`build_snapshot()`
+rejects a missing one before any of this runs) -- so all four columns are
+always populated. `render_pdf()` also embeds each of these PNGs under a
+"Time domain" sub-heading, immediately after that section's existing Bode
+image (per-block sections and the Combined section alike).
+
+This never blocks the rest of the export, mirroring §13's "invalid
+parameters on an *enabled* block" carve-out one step further: omitting
+`signal_chain` entirely (`export.py`'s own historical behavior, still the
+default) skips all of this outright; an empty signal chain, one whose
+blocks are all invalid, or a missing/non-positive
+`time_domain_duration_ms`/`time_domain_full_scale` (e.g. the user's
+duration/full-scale field was mid-edit and unparsable when Export was
+triggered -- `ui/app.py` passes `None` for either rather than raising)
+silently omits just the four `time_domain_*`/`data/*` artifacts and their
+now-unneeded `reports/data/` directory, while the PDF, C `source/` package,
+Bode/error-sweep plots, and `design.iirfilt` are written exactly as without
+a signal chain -- never a `ValueError`, never an empty placeholder file. See
+`export._time_domain_source()`.
 
 ---
 
@@ -848,43 +900,73 @@ class FilterChain:
 
 Added after v1's initial "no persistence" decision (§13) was reversed.
 
-- **Format:** versioned JSON, one object per file:
+- **Format:** versioned JSON, one object per file. Current (`schema_version: 2`,
+  §11's signal chain added):
   ```json
   {
-    "schema_version": 1,
+    "schema_version": 2,
     "fs": 13333.0,
     "blocks": [
       {"kind": "LP", "params": {"fc": 3000.0}, "enabled": true}
+    ],
+    "signals": [
+      {"kind": "SIN", "params": {"frequency": 1000.0, "amplitude": 0.5, "phase_deg": 0.0}, "factor": 1.0},
+      {"kind": "NOISE", "params": {"amplitude": 0.05, "seed": 123456}, "factor": 1.0}
     ]
   }
   ```
   `schema_version` is checked on load; an unrecognized value is rejected with an
-  actionable error rather than guessed at. File extension: `.iirfilt`. Written as
-  LF-only UTF-8 (same technique as §10's generated header) so line endings never
-  depend on platform.
-- **Scope — model-only, no UI chrome:** a project file captures exactly a
-  `FilterChain`'s round-trip state — chain-wide `fs`, plus every block's `kind`,
-  `params`, and `enabled` flag, **in chain order, including invalid and disabled
-  blocks** (unlike `export.py`'s `ExportSnapshot`, which is active-only and freshly
-  validated — a project file is round-trip state, not an export deliverable). UI
-  chrome (splitter sizes, selected block/tab, window geometry) is never persisted.
-- **`src/python/project_file.py`** owns `save_project(chain, path)` /
-  `load_project(path) -> (fs, blocks)`. `load_project` returns plain data — it does
-  **not** construct a `FilterChain` itself; the UI layer applies the result to the
-  chain it already has.
-- **UI rule — mutate the existing chain in place, never construct a new one:**
+  actionable error rather than guessed at. A `version 1` file (no `signals` key at
+  all -- the format before §11's signal chain existed) still loads, with an empty
+  signal chain; `save_project()` always writes the current version. File extension:
+  `.iirfilt`. Written as LF-only UTF-8 (same technique as §10's generated header) so
+  line endings never depend on platform.
+- **Scope — model-only, no UI chrome:** a project file captures a `FilterChain`'s
+  round-trip state — chain-wide `fs`, plus every block's `kind`, `params`, and
+  `enabled` flag, **in chain order, including invalid and disabled blocks** — and,
+  since schema v2, a `SignalChain`'s round-trip state the same way: every signal
+  block's `kind`, `params`, and `factor`, **in chain order, including invalid
+  blocks** (signal blocks have no `enabled` flag, §11.2 has none). A `NOISE`
+  block's `seed` is just another entry of its own `params` dict (see
+  `signals/chain.py`'s `add_block()`), so it round-trips with no dedicated field --
+  this also fixes what would otherwise be a reproducibility gap (§11's noise curve
+  changing on every reload). A `CSV` block's `file_path` is stored verbatim
+  (whatever the file picker returned, normally absolute) -- never rewritten to be
+  relative to the project file; if the path no longer resolves at load time the
+  block still round-trips, just marked invalid with `.error` set exactly like any
+  other invalid block (never a load-time failure). None of this is an export
+  deliverable (unlike `export.py`'s `ExportSnapshot`, which is active-only and
+  freshly validated). UI chrome (splitter sizes, selected block/tab, window
+  geometry) is never persisted.
+- **`src/python/project_file.py`** owns `save_project(chain, path, signal_chain=None)`
+  / `load_project(path) -> (fs, blocks, signal_blocks)`. `signal_chain` is optional
+  (`export.py`'s own call site has no `SignalChain` of its own and omits it, which
+  still writes a well-formed current-schema file with an empty `signals` list, not
+  a missing key). `load_project` returns plain data — it does **not** construct a
+  `FilterChain`/`SignalChain` itself; the UI layer applies the result to the chains
+  it already has.
+- **UI rule — mutate the existing chains in place, never construct new ones:**
   `ui/app.py`'s Open handler follows exactly the same pattern as the existing Reset
-  action (§13): if the chain is dirty, confirm via the same style of dialog; on
+  action (§13): if either chain is dirty, confirm via the same style of dialog; on
   proceeding, set `chain.fs` first (validates), then `chain.clear()`, then
   `chain.add_block(kind, **params)` per saved block (re-applying `enabled` via
-  `chain.set_enabled()`), then `chain.mark_clean()`. `canvas`/`inspector` hold a
-  reference to the original `FilterChain` instance, so it is mutated, never replaced.
-  A malformed file is fully parsed and validated *before* any mutation begins, so a
-  bad file can never leave the app in a half-applied state.
+  `chain.set_enabled()`), then `chain.mark_clean()` -- and, the same way, the
+  `SignalChain`'s `clear()` + `add_block(kind, factor=factor, **params)` per saved
+  signal block, then its own `mark_clean()`. `canvas`/`inspector` (both views) hold
+  references to the original `FilterChain`/`SignalChain` instances, so both are
+  mutated, never replaced. A malformed file is fully parsed and validated *before*
+  any mutation begins, so a bad file can never leave the app in a half-applied
+  state.
+- **`SignalChain` has its own `dirty`/`mark_clean()`** (mirrors `FilterChain`'s,
+  §13), set on every mutating method. The title-bar `"*"` and the
+  unsaved-changes-on-close/-open warnings now check *either* chain's `dirty` flag
+  (`MainWindow._is_dirty()`) -- since the signal chain is part of the project file
+  as of schema v2, an unsaved signal-block edit must warn exactly like an unsaved
+  filter-block edit.
 - Save/Save As/Open live in the **File** menu, alongside Export (Clear/Reset
   live in the **Edit** menu) — reversing this section's original "no menu bar"
   assumption; there is no toolbar in this app. Save
-  without a known path behaves like Save As. Saving marks the chain clean (same
+  without a known path behaves like Save As. Saving marks both chains clean (same
   `dirty` flag that already drives the title-bar `"*"` and the unsaved-changes-on-close
   warning, §13) and remembers the path for a subsequent plain Save.
 
@@ -986,3 +1068,37 @@ Added after v1's initial "no persistence" decision (§13) was reversed.
     round-trip project state), and replace an implicit "trust the generated files"
     posture with a real, automated, non-blocking compile-time proof that ships
     with every export.
+16. **Signal-chain (§11) persistence added, reversing §11.8's original "TBD, likely
+    a later iteration" exclusion** — the project file format bumps to
+    `schema_version: 2`, adding a `signals` section that round-trips the
+    `SignalChain`'s blocks (kind/params/factor, including invalid ones) the same
+    way `blocks` already round-trips the `FilterChain`; a `NOISE` block's `seed`
+    rides along inside its own `params` (no dedicated field needed), fixing what
+    would otherwise be a reproducibility gap across reloads. A version-1 file (no
+    `signals` key) still loads, with an empty signal chain. `SignalChain` gained
+    its own `dirty`/`mark_clean()` so the title-bar `"*"` and unsaved-changes
+    warnings cover signal-block edits too (§15).
+17. **Noise reseed control added** — a `NOISE` block's seed was previously fixed at
+    creation with no UI-visible way to change it (§11's stability guarantee: stays
+    fixed across unrelated edits/reloads). `SignalChain.reseed(block_id)` draws a
+    fresh random seed and re-validates via the existing `update_params()` path
+    (raises `ValueError` for a non-`NOISE` block, `KeyError` for an unknown one);
+    the Noise tile (`ui/widgets/signal_block.py`) now shows the current seed and a
+    **Reseed** button wired to it (`SignalBlockWidget.reseed_requested` →
+    `SignalCanvas.reseed_block()`), the one explicit, user-triggered exception to
+    that stability guarantee.
+18. **Time-domain export artifacts added, reversing §11.8's original "may follow
+    later" exclusion** — `export_design()` gained optional `signal_chain`/
+    `time_domain_duration_ms`/`time_domain_full_scale` parameters (§10's
+    "Time-domain export artifacts" addendum); when a non-empty, at-least-partly-
+    valid signal chain and a usable duration/full-scale are given, export writes
+    a Combined + per-active-filter-block PNG (`reports/figures/time_domain_*.png`)
+    and CSV (`reports/data/time_domain_*.csv`, `time_ms,source,ideal,q14`) pair,
+    and `render_pdf()` embeds each PNG under a new "Time domain" sub-heading.
+    Never blocks export: an omitted/empty/fully-invalid signal chain or an
+    unusable duration/full-scale just omits these artifacts, matching §13's
+    "invalid parameters on an *enabled* block" non-blocking philosophy. Also:
+    `design.iirfilt` now round-trips the exported `SignalChain` too (via
+    `save_project()`'s existing `signal_chain` parameter, previously unused by
+    `export.py`), so an export's own project file matches exactly what was
+    exported, signal chain included.

@@ -23,12 +23,14 @@ import pytest
 from PyQt6.QtCore import QMimeData, QPointF, Qt
 from PyQt6.QtGui import QDropEvent
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication, QFileDialog, QMenu, QMessageBox, QSplitter
+from PyQt6.QtWidgets import QApplication, QFileDialog, QLabel, QMenu, QMessageBox, QPushButton, QSplitter
 
 from filters import FilterChain
+from signals import SignalChain
 from ui import app as app_module
 from ui.app import DEFAULT_FS_HZ, MainWindow
 from ui.canvas import FilterCanvas
+from ui.signal_canvas import SignalCanvas
 from ui.widgets.filter_block import MIME_BLOCK_ID
 
 
@@ -50,8 +52,10 @@ def window(qapp):
     # each test's Qt object graph from piling up into the next one.
     # `mark_clean()` first so this teardown-time close() never raises a
     # real (unmocked, blocking) dirty-state confirmation dialog for a test
-    # that intentionally left the chain dirty.
+    # that intentionally left either chain dirty (closeEvent now checks
+    # both, since the signal chain is also part of the project, §15).
     win.chain.mark_clean()
+    win.time_domain_view.signal_chain.mark_clean()
     win.close()
     win.deleteLater()
     QApplication.processEvents()
@@ -61,6 +65,15 @@ def window(qapp):
 def canvas(qapp):
     chain = FilterChain(fs=13_333.0)
     widget = FilterCanvas(chain)
+    yield widget
+    widget.deleteLater()
+    QApplication.processEvents()
+
+
+@pytest.fixture
+def signal_canvas(qapp):
+    chain = SignalChain()
+    widget = SignalCanvas(chain)
     yield widget
     widget.deleteLater()
     QApplication.processEvents()
@@ -788,6 +801,42 @@ def test_export_always_forces_fresh_validation_not_a_stale_cache(window, monkeyp
     assert "fc = 1000 Hz" not in header_text
 
 
+def test_export_includes_time_domain_artifacts_when_signal_blocks_present(window, monkeypatch, tmp_path):
+    """`_on_export()` wires the Time-Domain view's own SignalChain plus its
+    Inspector's current duration/full-scale fields into export_design()
+    (CONTRACTS.md §10's time-domain export addendum) -- exercised here via
+    the real UI-facing defaults, not by calling export_design() directly."""
+    window.canvas.add_block("LP", fc=3000.0)
+    window.time_domain_view.canvas.add_block("SIN")
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+
+    window._on_export()
+
+    export_dir = next(tmp_path.iterdir())
+    assert (export_dir / "reports" / "figures" / "time_domain_combined.png").is_file()
+    assert (export_dir / "reports" / "figures" / "time_domain_lp_1.png").is_file()
+    assert (export_dir / "reports" / "data" / "time_domain_combined.csv").is_file()
+
+    from project_file import load_project
+
+    _, _, signal_blocks = load_project(export_dir / "design.iirfilt")
+    assert [b["kind"] for b in signal_blocks] == ["SIN"]
+
+
+def test_export_omits_time_domain_artifacts_when_no_signal_blocks(window, monkeypatch, tmp_path):
+    window.canvas.add_block("LP", fc=3000.0)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(tmp_path))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+
+    window._on_export()
+
+    export_dir = next(tmp_path.iterdir())
+    figure_names = {p.name for p in (export_dir / "reports" / "figures").iterdir()}
+    assert not any(name.startswith("time_domain_") for name in figure_names)
+    assert not (export_dir / "reports" / "data").exists()
+
+
 # --- Project file (save/open, CONTRACTS.md §15) -----------------------------------------
 
 
@@ -882,6 +931,116 @@ def test_open_cancelled_dialog_is_a_noop(window, monkeypatch):
     window._on_open()
 
     assert len(window.chain.blocks) == 1
+
+
+# --- signal-chain persistence (schema v2, §11/§15) --------------------------------------
+
+
+def test_save_as_then_open_round_trips_signal_chain(window, monkeypatch, tmp_path):
+    window.time_domain_view.canvas.add_block("SIN")
+    window.time_domain_view.signal_chain.update_params(
+        window.time_domain_view.signal_chain.blocks[0].id, frequency=2_000.0
+    )
+    target = tmp_path / "with_signals.iirfilt"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+    window._on_save_as()
+    assert window.time_domain_view.signal_chain.dirty is False
+
+    # Mutate further, then re-open the just-saved file to prove Open rebuilds
+    # the *same* SignalChain instance (canvas/inspector hold a reference to
+    # it) from the saved signal blocks, mirroring the filter-chain contract.
+    window.time_domain_view.canvas.add_block("DC")  # leaves signal_chain dirty again
+    original_signal_chain = window.time_domain_view.signal_chain
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (str(target), ""))
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+    window._on_open()
+
+    assert window.time_domain_view.signal_chain is original_signal_chain
+    assert [b.kind for b in window.time_domain_view.signal_chain.blocks] == ["SIN"]
+    assert window.time_domain_view.signal_chain.blocks[0].params["frequency"] == 2_000.0
+    assert window.time_domain_view.signal_chain.dirty is False
+
+
+def test_signal_chain_edit_marks_title_dirty(window):
+    assert "*" not in window.windowTitle()
+
+    window.time_domain_view.canvas.add_block("DC")
+
+    assert "*" in window.windowTitle()
+    window.time_domain_view.signal_chain.mark_clean()  # avoid a dialog when the fixture closes the window
+
+
+def test_open_confirms_when_only_signal_chain_is_dirty(window, monkeypatch):
+    window.time_domain_view.canvas.add_block("DC")
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
+    dialog_calls = []
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: dialog_calls.append(1) or ("", ""))
+
+    window._on_open()
+
+    assert dialog_calls == []  # never even opened the file dialog
+    assert len(window.time_domain_view.signal_chain.blocks) == 1
+
+
+def test_close_warns_when_only_signal_chain_is_dirty(window, monkeypatch):
+    window.time_domain_view.canvas.add_block("DC")
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Discard)
+
+    window.show()
+    closed = window.close()
+
+    assert closed is True
+
+
+# --- Noise reseed control (docs/CONCEPT.md §11) -----------------------------------------
+
+
+def test_reseed_button_present_only_for_noise_blocks(signal_canvas):
+    signal_canvas.add_block("DC")
+    assert signal_canvas.findChild(QPushButton, "reseedButton") is None
+
+    signal_canvas.add_block("NOISE")
+    assert signal_canvas.findChild(QPushButton, "reseedButton") is not None
+
+
+def test_reseed_button_click_draws_a_new_seed_and_stays_valid(signal_canvas):
+    block_id = signal_canvas.add_block("NOISE")
+    seed_before = signal_canvas.signal_chain.get_block(block_id).design.seed
+
+    signal_canvas.findChild(QPushButton, "reseedButton").click()
+
+    block = signal_canvas.signal_chain.get_block(block_id)
+    assert block.is_valid, block.error
+    assert block.design.seed != seed_before
+
+
+def test_reseed_button_click_rerenders_seed_label(signal_canvas):
+    signal_canvas.add_block("NOISE")
+
+    signal_canvas.findChild(QPushButton, "reseedButton").click()
+
+    block = signal_canvas.signal_chain.blocks[0]
+    seed_label = signal_canvas.findChild(QLabel, "signalBlockSeed")
+    assert seed_label.text() == str(block.params["seed"])
+
+
+def test_reseed_button_click_does_not_disturb_amplitude_field(signal_canvas):
+    block_id = signal_canvas.add_block("NOISE")
+    signal_canvas.update_params(block_id, {"amplitude": 0.3})
+
+    signal_canvas.findChild(QPushButton, "reseedButton").click()
+
+    assert signal_canvas.signal_chain.blocks[0].params["amplitude"] == 0.3
+
+
+def test_reseed_request_for_unknown_block_is_a_noop(signal_canvas):
+    block_id = signal_canvas.add_block("NOISE")
+    seed_before = signal_canvas.signal_chain.get_block(block_id).design.seed
+
+    signal_canvas.reseed_block("no-such-id")  # must not raise
+
+    assert signal_canvas.signal_chain.get_block(block_id).design.seed == seed_before
 
 
 # --- adjustable workspace layout (QSplitter) --------------------------------------------

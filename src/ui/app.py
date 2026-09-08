@@ -38,14 +38,17 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QDoubleValidator
 from PyQt6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QScrollArea,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -57,6 +60,7 @@ from project_file import PROJECT_FILE_EXTENSION, ProjectFileError, load_project,
 from ui.canvas import FilterCanvas
 from ui.inspector import Inspector
 from ui.palette import FilterPalette
+from ui.time_domain_view import TimeDomainView
 
 DEFAULT_FS_HZ = 13_333.0
 
@@ -137,16 +141,23 @@ class MainWindow(QMainWindow):
 
         self.canvas.chain_changed.connect(self._on_chain_changed)
         self.canvas.chain_changed.connect(self.inspector.refresh)
+        self.canvas.chain_changed.connect(self.time_domain_view.refresh_fs)
         self.canvas.selection_changed.connect(self.inspector.select_block)
         self.inspector.block_selected.connect(lambda _block_id: self.canvas.refresh())
         self.inspector.params_changed.connect(self._on_inspector_params_changed)
+        self.inspector.params_changed.connect(self.time_domain_view.refresh_fs)
+        # Signal-chain edits don't affect filter-chain validity/export gating,
+        # but they do make the project dirty (§15's persistence now covers the
+        # signal chain too, see project_file.py) -- so the title-bar "*" needs
+        # to react to them as well.
+        self.time_domain_view.canvas.chain_changed.connect(self._update_title)
         self._on_chain_changed()
 
     # -- layout ---------------------------------------------------------
 
     def _build_central_widget(self) -> None:
-        central = QWidget()
-        outer = QVBoxLayout(central)
+        design_view = QWidget()
+        outer = QVBoxLayout(design_view)
 
         fs_row = QHBoxLayout()
         fs_row.addWidget(QLabel("Sample rate fs (Hz):"))
@@ -175,7 +186,78 @@ class MainWindow(QMainWindow):
         self.splitter.setSizes([160, 220, 520])
         outer.addWidget(self.splitter, 1)
 
-        self.setCentralWidget(central)
+        # Second top-level view (docs/CONCEPT.md §11.7): swaps the whole
+        # central widget rather than adding a 4th panel to the Design view.
+        self.time_domain_view = TimeDomainView(self.chain, self.backend)
+
+        self.view_stack = QStackedWidget()
+        self.view_stack.addWidget(design_view)
+        self.view_stack.addWidget(self.time_domain_view)
+        self.setCentralWidget(self.view_stack)
+        self._build_view_switch()
+
+    def _build_view_switch(self) -> None:
+        """Design/Time Domain toggle, docked in the menu bar's corner (CONCEPT.md §11.7 mockup).
+
+        Styled as a single segmented-control "pill" rather than two plain
+        checkable QPushButtons -- under some Qt styles the default checked
+        look is a subtle sunken shading that's easy to miss, so which view
+        is active wasn't obvious at a glance. The active segment now gets a
+        solid accent fill (the same blue used for selection elsewhere, e.g.
+        `filter_block.py`'s selected-block border). The window title
+        (`_update_title`) echoes the active view name too, as a second,
+        always-visible cue.
+        """
+        switch = QWidget()
+        switch_layout = QHBoxLayout(switch)
+        switch_layout.setContentsMargins(0, 0, 8, 0)
+        switch_layout.setSpacing(0)
+
+        self.design_view_button = QPushButton("Design")
+        self.design_view_button.setObjectName("viewSwitchButtonLeft")
+        self.time_domain_view_button = QPushButton("Time Domain")
+        self.time_domain_view_button.setObjectName("viewSwitchButtonRight")
+        for button in (self.design_view_button, self.time_domain_view_button):
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            switch_layout.addWidget(button)
+
+        switch.setStyleSheet(
+            "#viewSwitchButtonLeft, #viewSwitchButtonRight {"
+            "  padding: 4px 14px;"
+            "  border: 1px solid #2980b9;"
+            "  border-radius: 4px;"
+            "  background: palette(button);"
+            "  color: #2980b9;"
+            "  font-weight: bold;"
+            "}"
+            "#viewSwitchButtonLeft:checked, #viewSwitchButtonRight:checked {"
+            "  background: #2980b9;"
+            "  color: white;"
+            "}"
+            "#viewSwitchButtonLeft:!checked:hover, #viewSwitchButtonRight:!checked:hover {"
+            "  background: #d6e9f8;"
+            "}"
+            "#viewSwitchButtonLeft {"
+            "  border-top-right-radius: 0;"
+            "  border-bottom-right-radius: 0;"
+            "  border-right: none;"
+            "}"
+            "#viewSwitchButtonRight {"
+            "  border-top-left-radius: 0;"
+            "  border-bottom-left-radius: 0;"
+            "}"
+        )
+
+        self.view_switch_group = QButtonGroup(self)
+        self.view_switch_group.setExclusive(True)
+        self.view_switch_group.addButton(self.design_view_button, 0)
+        self.view_switch_group.addButton(self.time_domain_view_button, 1)
+        self.design_view_button.setChecked(True)
+        self.view_switch_group.idClicked.connect(self.view_stack.setCurrentIndex)
+        self.view_switch_group.idClicked.connect(lambda _id: self._update_title())
+
+        self.menuBar().setCornerWidget(switch)
 
     def _build_actions(self) -> None:
         self.open_action = QAction("Open", self)
@@ -218,8 +300,14 @@ class MainWindow(QMainWindow):
         self._update_title()
 
     def _update_title(self) -> None:
-        star = "*" if self.chain.dirty else ""
-        self.setWindowTitle(f"IIR Filter Design Suite{star}")
+        star = "*" if self._is_dirty() else ""
+        view_name = "Time Domain" if self.view_stack.currentIndex() == 1 else "Design"
+        self.setWindowTitle(f"IIR Filter Design Suite{star} — {view_name}")
+
+    def _is_dirty(self) -> bool:
+        """True if either chain has unsaved changes -- both are now part of the
+        project file (§15), so either one dirties the project as a whole."""
+        return self.chain.dirty or self.time_domain_view.signal_chain.dirty
 
     def _on_inspector_params_changed(self) -> None:
         self.canvas.refresh()
@@ -239,6 +327,7 @@ class MainWindow(QMainWindow):
         self.fs_error_label.setVisible(False)
         self.canvas.refresh()
         self.inspector.refresh()
+        self.time_domain_view.refresh_fs()
         self._on_chain_changed()
 
     # -- Project file (save/open, CONTRACTS.md §15) --------------------------
@@ -262,17 +351,18 @@ class MainWindow(QMainWindow):
 
     def _save_to(self, path: Path) -> None:
         try:
-            save_project(self.chain, path)
+            save_project(self.chain, path, self.time_domain_view.signal_chain)
         except ProjectFileError as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
             return
         self._project_path = path
         self.chain.mark_clean()
+        self.time_domain_view.signal_chain.mark_clean()
         self._update_title()
         self.statusBar().showMessage(f"Saved to {path}", 5000)
 
     def _on_open(self) -> None:
-        if self.chain.dirty:
+        if self._is_dirty():
             reply = QMessageBox.question(
                 self,
                 "Open project?",
@@ -290,10 +380,10 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            fs, blocks = load_project(path_str)
+            fs, blocks, signal_blocks = load_project(path_str)
         except ProjectFileError as exc:
             QMessageBox.critical(self, "Open failed", str(exc))
-            return  # load fully before touching the chain -- a bad file never leaves it half-mutated
+            return  # load fully before touching the chains -- a bad file never leaves them half-mutated
 
         try:
             self.chain.fs = fs
@@ -307,12 +397,26 @@ class MainWindow(QMainWindow):
             if not block["enabled"]:
                 self.chain.set_enabled(block_id, False)
         self.chain.mark_clean()
+
+        # Same "mutate the existing model in place" rule as the filter chain
+        # above -- the canvas/inspector already hold a reference to this
+        # SignalChain instance (owned by TimeDomainView), so it's cleared and
+        # rebuilt rather than swapped for a new one.
+        signal_chain = self.time_domain_view.signal_chain
+        signal_chain.clear()
+        for signal_block in signal_blocks:
+            signal_chain.add_block(signal_block["kind"], factor=signal_block["factor"], **signal_block["params"])
+        signal_chain.mark_clean()
+
         self._project_path = Path(path_str)
 
         self.fs_edit.setText(f"{self.chain.fs:g}")
         self.fs_error_label.setVisible(False)
         self.canvas.refresh()
         self.inspector.refresh()
+        self.time_domain_view.refresh_fs()
+        self.time_domain_view.canvas.refresh()
+        self.time_domain_view.inspector.refresh_live()
         self._on_chain_changed()
         self.statusBar().showMessage(f"Opened {path_str}", 5000)
 
@@ -330,6 +434,16 @@ class MainWindow(QMainWindow):
         Both error dialogs include the relevant path (the export directory
         if one is known, otherwise the destination folder the user picked).
         On success, a confirmation dialog reports the export directory too.
+
+        Also passes the Time-Domain view's `SignalChain` plus its Inspector's
+        *current* duration/full-scale field values (CONCEPT.md §11.4), so the
+        time-domain PNG/CSV artifacts -- when signal blocks exist -- reflect
+        exactly what the user is looking at in that view, not a fixed
+        export-only default. An unparsable duration/full-scale field (e.g.
+        left empty mid-edit) is passed through as `None`, which
+        `export_design()` treats like an empty signal chain: the time-domain
+        artifacts are silently omitted, the rest of the export is unaffected
+        (never a reason to fail Export outright).
         """
         if self.backend is None:
             QMessageBox.critical(
@@ -344,8 +458,25 @@ class MainWindow(QMainWindow):
         if not output_root:
             return
 
+        inspector = self.time_domain_view.inspector
         try:
-            result = export_design(self.chain, self.backend, output_root)
+            duration_ms = inspector.duration_ms()
+        except ValueError:
+            duration_ms = None
+        try:
+            full_scale = inspector.full_scale()
+        except ValueError:
+            full_scale = None
+
+        try:
+            result = export_design(
+                self.chain,
+                self.backend,
+                output_root,
+                signal_chain=self.time_domain_view.signal_chain,
+                time_domain_duration_ms=duration_ms,
+                time_domain_full_scale=full_scale,
+            )
         except (ValueError, ExportError) as exc:
             # ExportError may know the specific export directory it failed
             # inside (see export.ExportError/export_design); a plain
@@ -380,12 +511,13 @@ class MainWindow(QMainWindow):
         self.fs_error_label.setVisible(False)
         self.canvas.refresh()
         self.inspector.refresh()
+        self.time_domain_view.refresh_fs()
         self._on_chain_changed()
 
     # -- close / dirty warning -----------------------------------------------
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
-        if not self.chain.dirty:
+        if not self._is_dirty():
             event.accept()
             return
 
@@ -403,7 +535,7 @@ class MainWindow(QMainWindow):
             return
         if reply == QMessageBox.StandardButton.Save:
             self._on_save()
-            if self.chain.dirty:
+            if self._is_dirty():
                 # Save-as was cancelled or save_project() failed -- stay open
                 # rather than discarding changes the user asked to keep.
                 event.ignore()

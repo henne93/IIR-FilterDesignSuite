@@ -64,6 +64,24 @@ Produces a timestamped `export_YYYYMMDD_HHMMSS/` directory:
                                 bandwidth fixed, clamped at the
                                 `[100, fc_max(fs)]` domain edges (CONTRACTS.md
                                 §6.3) -- see `_sweep_design_at()`.
+    - `figures/time_domain_combined.png`   -- source/ideal/Q14 time-domain
+                                plot for the whole chain (CONCEPT.md §11).
+    - `figures/time_domain_<kind>_<n>.png` -- one per chain block, same
+                                `<n>` numbering as `bode_<kind>_<n>.png`.
+    - `data/time_domain_combined.csv`      -- the combined plot's three
+                                curves as columns (`time_ms,source,ideal,q14`).
+    - `data/time_domain_<kind>_<n>.csv`    -- per-block counterpart, same
+                                `<n>` numbering.
+
+      The four `time_domain_*`/`data/*` artifacts above are only produced
+      when a `SignalChain` is passed to `export_design()` *and* it has at
+      least one valid signal block *and* a usable duration/full-scale were
+      supplied -- see `export_design()`'s own docstring. This never blocks
+      the rest of the export: an empty/fully-invalid signal chain, or an
+      omitted `signal_chain` entirely (e.g. this module's own historical
+      call sites with no signal chain of their own), simply omits these
+      files and their `data/` directory, with everything else (PDF/C
+      package/Bode/error-sweep) written exactly as before.
     - `test/test_summary.txt` -- PASS/FAIL/SKIPPED verdict from compiling
                                 and running the just-written `source/`
                                 package against this export's own snapshot
@@ -133,6 +151,8 @@ from error_analysis import (
 from filters.base import Coefficients, FilterDesign, NativeBackend, Q14Coefficients, fc_max
 from filters.chain import BlockKind, ChainBlock, FilterChain
 from project_file import PROJECT_FILE_EXTENSION, ProjectFileError, save_project
+from signals import SignalChain
+from time_domain import TimeDomainResult, compute as compute_time_domain, n_samples_for
 
 # Reference C source (CONTRACTS.md §7, §10) -- render_source_package() below
 # reads src/c/biquad_q14.{h,c} and src/c/filter_design.h from here.
@@ -147,6 +167,7 @@ FIRMWARE_EXAMPLE_N_SAMPLES = 32
 SOURCE_DIRNAME = "source"
 REPORTS_DIRNAME = "reports"
 FIGURES_DIRNAME = "figures"
+DATA_DIRNAME = "data"
 TEST_DIRNAME = "test"
 BIQUAD_DIRNAME = "biquad_q14"
 APP_TEMPLATE_DIRNAME = "app_template"
@@ -172,6 +193,7 @@ ERROR_SWEEP_PLOT_N = 200
 
 IDEAL_COLOR = "#2980b9"
 Q14_COLOR = "#c0392b"
+SOURCE_COLOR = "#7f8c8d"
 
 PHASE_YLIM = (-180.0, 180.0)
 MAGNITUDE_YLIM_FLOOR = -100.0
@@ -1071,6 +1093,60 @@ def _save_figure(fig: Figure, path: Path) -> None:
         raise ExportError(f"failed to write PNG {path}: {exc}") from exc
 
 
+# -- Time-domain plots + CSV (CONCEPT.md §11) ---------------------------------
+#
+# Optional artifacts, only produced when export_design() is given a
+# SignalChain with at least one valid block and a usable duration/full-scale
+# -- see _time_domain_source() and export_design()'s own docstring. `q14` is
+# never None here: export always requires a NativeBackend (build_snapshot()
+# rejects a missing one before any of this runs), and that same backend is
+# what compute_time_domain() below is called with.
+
+
+def _time_domain_source(
+    signal_chain: SignalChain | None, duration_ms: float | None, full_scale: int | None, fs: float
+) -> np.ndarray | None:
+    """Returns the generated source signal, or `None` if time-domain export
+    should be silently skipped this run (never raises): no signal chain
+    given, an empty or fully-invalid one, or a missing/non-positive
+    duration. A `None` return is a normal, expected state here -- it is
+    export_design()'s own contract to omit the time-domain artifacts rather
+    than block export or fabricate placeholder output.
+    """
+    if signal_chain is None or not signal_chain.blocks or not signal_chain.valid_blocks:
+        return None
+    if duration_ms is None or not duration_ms > 0 or full_scale is None:
+        return None
+    n = n_samples_for(duration_ms, fs)
+    return signal_chain.source_signal(n, fs)
+
+
+def _save_time_domain_png(path: Path, result: TimeDomainResult, title: str) -> None:
+    fig = Figure(figsize=(6.0, 3.5), layout="constrained")
+    FigureCanvasAgg(fig)
+    ax = fig.subplots(1, 1)
+    ax.plot(result.time_ms, result.source, color=SOURCE_COLOR, label="Source")
+    ax.plot(result.time_ms, result.ideal, color=IDEAL_COLOR, label="Ideal")
+    ax.plot(result.time_ms, result.q14, color=Q14_COLOR, linestyle="--", label="Q14")
+    ax.set_xlabel("Time (ms)")
+    ax.set_ylabel("Amplitude (normalized)")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize="small")
+    _save_figure(fig, path)
+
+
+def _write_time_domain_csv(path: Path, result: TimeDomainResult) -> None:
+    """Writes `time_ms,source,ideal,q14` -- one header row plus one row per
+    sample, LF-only UTF-8 (CONTRACTS.md §10/§15 convention for this suite's
+    generated text files).
+    """
+    lines = ["time_ms,source,ideal,q14"]
+    for t, s, i, q in zip(result.time_ms, result.source, result.ideal, result.q14):
+        lines.append(f"{t:.10g},{s:.10g},{i:.10g},{q:.10g}")
+    _write_text_lf(path, "\n".join(lines) + "\n", encoding="utf-8")
+
+
 # -- PDF report (CONCEPT.md §7) ------------------------------------------------
 
 
@@ -1079,6 +1155,8 @@ def render_pdf(
     path: Path,
     combined_bode_png: Path,
     block_bode_pngs: Mapping[int, Path],
+    time_domain_combined_png: Path | None = None,
+    time_domain_block_pngs: Mapping[int, Path] | None = None,
 ) -> None:
     styles = getSampleStyleSheet()
     code_style = ParagraphStyle("Code", parent=styles["Normal"], fontName="Courier", fontSize=6.5, leading=8)
@@ -1115,6 +1193,11 @@ def render_pdf(
         png = block_bode_pngs.get(block.position)
         if png is not None and png.is_file():
             story.append(Image(str(png), width=5.0 * inch, height=3.75 * inch))
+
+        td_png = (time_domain_block_pngs or {}).get(block.position)
+        if td_png is not None and td_png.is_file():
+            story.append(Paragraph("Time domain", styles["Heading3"]))
+            story.append(Image(str(td_png), width=5.0 * inch, height=2.92 * inch))
 
         table_data = [["coefficient", "ideal (float64)", "Q14 (int16)", "Q14 (float)"]]
         for coef in COEFFICIENT_NAMES:
@@ -1153,6 +1236,9 @@ def render_pdf(
     story.append(Paragraph("Combined chain", heading_style))
     if combined_bode_png.is_file():
         story.append(Image(str(combined_bode_png), width=5.0 * inch, height=3.75 * inch))
+    if time_domain_combined_png is not None and time_domain_combined_png.is_file():
+        story.append(Paragraph("Time domain", styles["Heading3"]))
+        story.append(Image(str(time_domain_combined_png), width=5.0 * inch, height=2.92 * inch))
     story.append(
         Paragraph(
             f"Combined response error vs Q14 -- max: {snapshot.combined_response_error.max_db:.4f} dB, "
@@ -1219,6 +1305,10 @@ class ExportResult:
     block_bode_pngs: Mapping[int, Path]
     error_sweep_pngs: Mapping[int, Path]
     test_summary_path: Path
+    time_domain_combined_png: Path | None
+    time_domain_block_pngs: Mapping[int, Path]
+    time_domain_combined_csv: Path | None
+    time_domain_block_csvs: Mapping[int, Path]
 
 
 def _make_export_dir(output_root: Path, generated_at: datetime) -> Path:
@@ -1253,6 +1343,9 @@ def export_design(
     output_root: Path | str,
     *,
     now: datetime | None = None,
+    signal_chain: SignalChain | None = None,
+    time_domain_duration_ms: float | None = None,
+    time_domain_full_scale: int | None = None,
 ) -> ExportResult:
     """Forces a fresh validation pass and writes the full export file set.
 
@@ -1261,6 +1354,21 @@ def export_design(
     project-file failures encountered while writing the file set. The C
     validation step (`run_c_validation()`) is the one exception: by design it
     never raises, regardless of what it finds (see its own docstring).
+
+    `signal_chain`/`time_domain_duration_ms`/`time_domain_full_scale` are all
+    optional and independent of the FilterChain-only validation above (see
+    module docstring's "Time-domain plots + CSV" paragraph): when
+    `signal_chain` is omitted (the default) no time-domain artifacts are
+    produced at all. When given, an empty signal chain, one whose blocks are
+    all invalid, or a missing/non-positive duration/full-scale never blocks
+    export -- the time-domain PNG/CSV artifacts are simply omitted (see
+    `_time_domain_source()`) while everything else is written exactly as
+    without a signal chain. The duration/full-scale values are used exactly
+    as given -- typically whatever the Time-Domain Inspector's UI fields
+    currently hold (`ui/time_domain_inspector.py`'s `duration_ms()`/
+    `full_scale()`), not a fixed export-only default -- since, unlike the
+    Bode sweep grid, they are the user's own deliberate exploration settings
+    (CONCEPT.md §11.4).
     """
     snapshot = build_snapshot(chain, backend, now=now)
     output_root = Path(output_root)
@@ -1283,6 +1391,30 @@ def export_design(
         combined_png = figures_dir / "bode_combined.png"
         _save_bode_png(combined_png, combined_ideal, combined_q14, "Combined chain")
 
+        # Time-domain artifacts (optional -- see export_design()'s own
+        # docstring and module docstring's "Time-domain plots + CSV"
+        # section). `data_dir` is only created when there is at least one
+        # time-domain artifact to put in it.
+        time_domain_source = _time_domain_source(signal_chain, time_domain_duration_ms, time_domain_full_scale, chain.fs)
+        td_combined_png: Path | None = None
+        td_combined_csv: Path | None = None
+        td_block_pngs: dict[int, Path] = {}
+        td_block_csvs: dict[int, Path] = {}
+        data_dir = reports_dir / DATA_DIRNAME
+        if time_domain_source is not None:
+            try:
+                data_dir.mkdir(parents=True, exist_ok=False)
+            except OSError as exc:
+                raise ExportError(f"failed to create directory {data_dir}: {exc}") from exc
+
+            combined_td = compute_time_domain(
+                time_domain_source, chain.valid_filters, chain.fs, time_domain_full_scale, backend
+            )
+            td_combined_png = figures_dir / "time_domain_combined.png"
+            _save_time_domain_png(td_combined_png, combined_td, "Combined chain: time domain")
+            td_combined_csv = data_dir / "time_domain_combined.csv"
+            _write_time_domain_csv(td_combined_csv, combined_td)
+
         block_pngs: dict[int, Path] = {}
         sweep_pngs: dict[int, Path] = {}
         for block, block_snap in zip(_active_blocks(chain), snapshot.blocks):
@@ -1302,6 +1434,17 @@ def export_design(
                 )
                 sweep_pngs[block_snap.position] = sweep_path
 
+            if time_domain_source is not None:
+                block_td = compute_time_domain(time_domain_source, [filt], chain.fs, time_domain_full_scale, backend)
+                td_png_path = figures_dir / f"time_domain_{block.kind.lower()}_{block_snap.position}.png"
+                _save_time_domain_png(
+                    td_png_path, block_td, f"{block_snap.name}: {FILTER_KIND_NAMES[block.kind]} -- time domain"
+                )
+                td_block_pngs[block_snap.position] = td_png_path
+                td_csv_path = data_dir / f"time_domain_{block.kind.lower()}_{block_snap.position}.csv"
+                _write_time_domain_csv(td_csv_path, block_td)
+                td_block_csvs[block_snap.position] = td_csv_path
+
         source_dir = render_source_package(snapshot, export_dir)
         header_path = source_dir / BIQUAD_DIRNAME / GEN_DIRNAME / "filter_design.h"
 
@@ -1310,11 +1453,11 @@ def export_design(
         test_summary_path = run_c_validation(snapshot, source_dir, reports_test_dir, backend)
 
         pdf_path = reports_dir / PDF_FILENAME
-        render_pdf(snapshot, pdf_path, combined_png, block_pngs)
+        render_pdf(snapshot, pdf_path, combined_png, block_pngs, td_combined_png, td_block_pngs)
 
         project_file_path = export_dir / PROJECT_FILENAME
         try:
-            save_project(chain, project_file_path)
+            save_project(chain, project_file_path, signal_chain)
         except ProjectFileError as exc:
             raise ExportError(str(exc)) from exc
     except ExportError as exc:
@@ -1338,4 +1481,8 @@ def export_design(
         block_bode_pngs=MappingProxyType(block_pngs),
         error_sweep_pngs=MappingProxyType(sweep_pngs),
         test_summary_path=test_summary_path,
+        time_domain_combined_png=td_combined_png,
+        time_domain_block_pngs=MappingProxyType(td_block_pngs),
+        time_domain_combined_csv=td_combined_csv,
+        time_domain_block_csvs=MappingProxyType(td_block_csvs),
     )
