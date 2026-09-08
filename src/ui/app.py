@@ -385,15 +385,27 @@ class MainWindow(QMainWindow):
     # -- close / dirty warning -----------------------------------------------
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
-        if self.chain.dirty:
-            reply = QMessageBox.question(
-                self,
-                "Unsaved changes",
-                "The filter chain has unsaved changes. Quit anyway?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
+        if not self.chain.dirty:
+            event.accept()
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Unsaved changes",
+            "The filter chain has unsaved changes. Save before closing?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if reply == QMessageBox.StandardButton.Cancel:
+            event.ignore()
+            return
+        if reply == QMessageBox.StandardButton.Save:
+            self._on_save()
+            if self.chain.dirty:
+                # Save-as was cancelled or save_project() failed -- stay open
+                # rather than discarding changes the user asked to keep.
                 event.ignore()
                 return
         event.accept()

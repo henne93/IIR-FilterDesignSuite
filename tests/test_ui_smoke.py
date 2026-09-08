@@ -576,14 +576,14 @@ def test_reset_declined_keeps_state(window, monkeypatch):
 # --- dirty-state quit warning -------------------------------------------------------
 
 
-def test_dirty_state_quit_warning_declined_keeps_window_open(window, monkeypatch):
+def test_dirty_state_quit_warning_cancelled_keeps_window_open(window, monkeypatch):
     # Automatic validation (CONTRACTS.md §13) re-runs `refresh_validation()`
     # after every mutation and marks the chain clean again immediately, so
     # `add_block()` alone no longer leaves `chain.dirty` True. Set it
     # directly to exercise the quit-warning code path itself.
     window.canvas.add_block("LP")
     window.chain.dirty = True
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Cancel)
 
     window.show()
     closed = window.close()
@@ -593,9 +593,10 @@ def test_dirty_state_quit_warning_declined_keeps_window_open(window, monkeypatch
     window.chain.mark_clean()  # avoid a real modal dialog when the fixture drops the window
 
 
-def test_dirty_state_quit_warning_accepted_closes_window(window, monkeypatch):
+def test_dirty_state_quit_warning_discarded_closes_window(window, monkeypatch):
     window.canvas.add_block("LP")
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    window.chain.dirty = True
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Discard)
 
     window.show()
     closed = window.close()
@@ -603,10 +604,42 @@ def test_dirty_state_quit_warning_accepted_closes_window(window, monkeypatch):
     assert closed is True
 
 
+def test_dirty_state_quit_warning_save_closes_window(window, monkeypatch, tmp_path):
+    window.canvas.add_block("LP")
+    window.chain.dirty = True
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Save)
+    window._project_path = tmp_path / "quit_save.iirfilt"
+
+    window.show()
+    closed = window.close()
+
+    assert closed is True
+    assert window.chain.dirty is False
+    assert window._project_path.exists()
+
+
+def test_dirty_state_quit_warning_save_as_cancelled_keeps_window_open(window, monkeypatch):
+    # Save chosen but no project path yet -- `_on_save` falls through to
+    # `_on_save_as`, whose file dialog the user then cancels. The chain
+    # stays dirty, so the close must be aborted rather than discarding.
+    window.canvas.add_block("LP")
+    window.chain.dirty = True
+    window._project_path = None
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Save)
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: ("", ""))
+
+    window.show()
+    closed = window.close()
+
+    assert closed is False
+    assert window.isVisible()
+    window.chain.mark_clean()  # avoid a real modal dialog when the fixture drops the window
+
+
 def test_clean_state_quits_without_warning(window, monkeypatch):
     calls = []
     monkeypatch.setattr(
-        QMessageBox, "question", lambda *a, **k: calls.append(1) or QMessageBox.StandardButton.Yes
+        QMessageBox, "question", lambda *a, **k: calls.append(1) or QMessageBox.StandardButton.Save
     )
 
     window.show()
