@@ -11,6 +11,7 @@ import ctypes
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Sequence
@@ -189,6 +190,14 @@ class NativeBackend:
         _configure_argtypes(self._lib)
 
     def close(self) -> None:
+        if self._lib is not None:
+            if sys.platform == "win32":
+                # Windows keeps a loaded DLL's file locked for the life of the
+                # mapping, so the temp dir below can't be deleted until the
+                # library handle is explicitly released (unlike POSIX, which
+                # allows unlinking an open/mapped file).
+                ctypes.windll.kernel32.FreeLibrary(self._lib._handle)
+            self._lib = None
         if self._tmpdir_obj is not None:
             self._tmpdir_obj.cleanup()
             self._tmpdir_obj = None

@@ -1,0 +1,11 @@
+# Normalize line endings to LF on checkout, regardless of platform.
+#
+# Without this, Git for Windows (core.autocrlf=true, the default on GitHub's
+# hosted Windows runners) converts LF -> CRLF when checking files out. That
+# breaks tests that compare a generated firmware file (always written with
+# LF, per docs/CONTRACTS.md section 10) byte-for-byte against the checked-out
+# src/c/*.c|h it was copied from.
+* text=auto eol=lf
+
+src/c/*.c text eol=lf
+src/c/*.h text eol=lf
