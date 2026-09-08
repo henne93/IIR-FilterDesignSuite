@@ -195,7 +195,13 @@ class NativeBackend:
                 # Windows keeps a loaded DLL's file locked for the life of the
                 # mapping, so the temp dir below can't be deleted until the
                 # library handle is explicitly released (unlike POSIX, which
-                # allows unlinking an open/mapped file).
+                # allows unlinking an open/mapped file). argtypes must be set
+                # explicitly: ctypes otherwise marshals the handle as a 32-bit
+                # int, which overflows for handles loaded at high addresses
+                # (common on 64-bit Windows).
+                from ctypes import wintypes
+
+                ctypes.windll.kernel32.FreeLibrary.argtypes = [wintypes.HMODULE]
                 ctypes.windll.kernel32.FreeLibrary(self._lib._handle)
             self._lib = None
         if self._tmpdir_obj is not None:
