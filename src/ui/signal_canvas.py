@@ -8,13 +8,15 @@ mutating method calls into the model first and then rebuilds tiles from
 
 Blocks are shown as a flat, unordered list feeding a sum (§11.2/§11.7) --
 there are no series connectors and no reordering, since summation order
-doesn't matter (unlike the filter chain's series canvas).
+doesn't matter (unlike the filter chain's series canvas). They are stacked
+vertically (one per row) rather than side by side, since the list can grow
+long and a single scrollable column reads better than horizontal scrolling.
 """
 
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMessageBox, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QLabel, QMessageBox, QVBoxLayout, QWidget
 
 from signals import SignalChain, SignalChainBlock
 from ui.signal_palette import MIME_SIGNAL_KIND
@@ -46,8 +48,8 @@ class SignalCanvas(QWidget):
         self._placeholder.setStyleSheet("color: #888;")
         self._layout.addWidget(self._placeholder)
 
-        self._blocks_row = QHBoxLayout()
-        self._layout.addLayout(self._blocks_row)
+        self._blocks_column = QVBoxLayout()
+        self._layout.addLayout(self._blocks_column)
         self._layout.addStretch(1)
 
         self.chain_changed.connect(self.refresh)
@@ -57,8 +59,8 @@ class SignalCanvas(QWidget):
 
     def refresh(self) -> None:
         """Rebuilds child widgets from `signal_chain.blocks` -- the only place widgets are created."""
-        while self._blocks_row.count():
-            item = self._blocks_row.takeAt(0)
+        while self._blocks_column.count():
+            item = self._blocks_column.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.setParent(None)
@@ -72,13 +74,13 @@ class SignalCanvas(QWidget):
             tile.params_edited.connect(self.update_params)
             tile.delete_requested.connect(self.request_remove_block)
             tile.reseed_requested.connect(self.reseed_block)
-            self._blocks_row.addWidget(tile)
+            self._blocks_column.addWidget(tile, 0, Qt.AlignmentFlag.AlignLeft)
 
         if blocks:
             sigma = QLabel("Σ")
             sigma.setStyleSheet("font-size: 18pt;")
-            self._blocks_row.addWidget(sigma)
-        self._blocks_row.addStretch(1)
+            self._blocks_column.addWidget(sigma, 0, Qt.AlignmentFlag.AlignHCenter)
+        self._blocks_column.addStretch(1)
 
     # -- mutation (model first, then re-render via chain_changed) -----------------
 

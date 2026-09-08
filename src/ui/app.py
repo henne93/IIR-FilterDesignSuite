@@ -197,16 +197,57 @@ class MainWindow(QMainWindow):
         self._build_view_switch()
 
     def _build_view_switch(self) -> None:
-        """Design/Time Domain toggle, docked in the menu bar's corner (CONCEPT.md §11.7 mockup)."""
+        """Design/Time Domain toggle, docked in the menu bar's corner (CONCEPT.md §11.7 mockup).
+
+        Styled as a single segmented-control "pill" rather than two plain
+        checkable QPushButtons -- under some Qt styles the default checked
+        look is a subtle sunken shading that's easy to miss, so which view
+        is active wasn't obvious at a glance. The active segment now gets a
+        solid accent fill (the same blue used for selection elsewhere, e.g.
+        `filter_block.py`'s selected-block border). The window title
+        (`_update_title`) echoes the active view name too, as a second,
+        always-visible cue.
+        """
         switch = QWidget()
         switch_layout = QHBoxLayout(switch)
         switch_layout.setContentsMargins(0, 0, 8, 0)
+        switch_layout.setSpacing(0)
 
         self.design_view_button = QPushButton("Design")
+        self.design_view_button.setObjectName("viewSwitchButtonLeft")
         self.time_domain_view_button = QPushButton("Time Domain")
+        self.time_domain_view_button.setObjectName("viewSwitchButtonRight")
         for button in (self.design_view_button, self.time_domain_view_button):
             button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
             switch_layout.addWidget(button)
+
+        switch.setStyleSheet(
+            "#viewSwitchButtonLeft, #viewSwitchButtonRight {"
+            "  padding: 4px 14px;"
+            "  border: 1px solid #2980b9;"
+            "  border-radius: 4px;"
+            "  background: palette(button);"
+            "  color: #2980b9;"
+            "  font-weight: bold;"
+            "}"
+            "#viewSwitchButtonLeft:checked, #viewSwitchButtonRight:checked {"
+            "  background: #2980b9;"
+            "  color: white;"
+            "}"
+            "#viewSwitchButtonLeft:!checked:hover, #viewSwitchButtonRight:!checked:hover {"
+            "  background: #d6e9f8;"
+            "}"
+            "#viewSwitchButtonLeft {"
+            "  border-top-right-radius: 0;"
+            "  border-bottom-right-radius: 0;"
+            "  border-right: none;"
+            "}"
+            "#viewSwitchButtonRight {"
+            "  border-top-left-radius: 0;"
+            "  border-bottom-left-radius: 0;"
+            "}"
+        )
 
         self.view_switch_group = QButtonGroup(self)
         self.view_switch_group.setExclusive(True)
@@ -214,6 +255,7 @@ class MainWindow(QMainWindow):
         self.view_switch_group.addButton(self.time_domain_view_button, 1)
         self.design_view_button.setChecked(True)
         self.view_switch_group.idClicked.connect(self.view_stack.setCurrentIndex)
+        self.view_switch_group.idClicked.connect(lambda _id: self._update_title())
 
         self.menuBar().setCornerWidget(switch)
 
@@ -259,7 +301,8 @@ class MainWindow(QMainWindow):
 
     def _update_title(self) -> None:
         star = "*" if self._is_dirty() else ""
-        self.setWindowTitle(f"IIR Filter Design Suite{star}")
+        view_name = "Time Domain" if self.view_stack.currentIndex() == 1 else "Design"
+        self.setWindowTitle(f"IIR Filter Design Suite{star} — {view_name}")
 
     def _is_dirty(self) -> bool:
         """True if either chain has unsaved changes -- both are now part of the
