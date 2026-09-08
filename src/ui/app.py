@@ -141,9 +141,11 @@ class MainWindow(QMainWindow):
 
         self.canvas.chain_changed.connect(self._on_chain_changed)
         self.canvas.chain_changed.connect(self.inspector.refresh)
+        self.canvas.chain_changed.connect(self.time_domain_view.refresh_fs)
         self.canvas.selection_changed.connect(self.inspector.select_block)
         self.inspector.block_selected.connect(lambda _block_id: self.canvas.refresh())
         self.inspector.params_changed.connect(self._on_inspector_params_changed)
+        self.inspector.params_changed.connect(self.time_domain_view.refresh_fs)
         self._on_chain_changed()
 
     # -- layout ---------------------------------------------------------
@@ -181,7 +183,7 @@ class MainWindow(QMainWindow):
 
         # Second top-level view (docs/CONCEPT.md §11.7): swaps the whole
         # central widget rather than adding a 4th panel to the Design view.
-        self.time_domain_view = TimeDomainView(self.chain)
+        self.time_domain_view = TimeDomainView(self.chain, self.backend)
 
         self.view_stack = QStackedWidget()
         self.view_stack.addWidget(design_view)
